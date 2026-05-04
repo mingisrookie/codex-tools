@@ -757,30 +757,17 @@ async fn refresh_usage_for_target(
 }
 
 async fn handle_refresh_failure(
-    app: &AppHandle,
-    state: &AppState,
-    account_key: &str,
+    _app: &AppHandle,
+    _state: &AppState,
+    _account_key: &str,
     raw_error: &str,
-    auth_refresh_blocked: &mut bool,
-    auth_refresh_error: &mut Option<String>,
+    _auth_refresh_blocked: &mut bool,
+    _auth_refresh_error: &mut Option<String>,
     refresh_error: &mut Option<String>,
 ) {
     if should_suspend_auth_keepalive(raw_error) {
         let normalized_error = normalize_usage_error_message(raw_error);
-        *auth_refresh_blocked = true;
-        *auth_refresh_error = Some(normalized_error.clone());
-        if let Err(err) = persist_account_refresh_state(
-            app,
-            state,
-            account_key,
-            None,
-            true,
-            Some(normalized_error.as_str()),
-        )
-        .await
-        {
-            *refresh_error = Some(err);
-        }
+        *refresh_error = Some(normalized_error);
         return;
     }
 
