@@ -2,6 +2,8 @@
 mod app_paths;
 #[path = "../../src/auth.rs"]
 mod auth;
+#[path = "../../src/dashboard_metrics.rs"]
+mod dashboard_metrics;
 #[path = "../../src/models.rs"]
 mod models;
 #[path = "../../src/profile_files.rs"]
