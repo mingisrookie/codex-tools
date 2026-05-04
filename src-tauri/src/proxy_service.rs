@@ -3140,16 +3140,7 @@ async fn refresh_proxy_candidate_auth(
         Ok(refreshed) => refreshed,
         Err(error) => {
             if should_suspend_proxy_refresh(&error) {
-                let normalized = normalize_proxy_refresh_error(&error);
-                persist_candidate_refresh_state(
-                    storage,
-                    &candidate.account_key,
-                    None,
-                    true,
-                    Some(normalized.as_str()),
-                )
-                .await?;
-                return Err(normalized);
+                return Err(normalize_proxy_refresh_error(&error));
             }
             return Err(error);
         }
