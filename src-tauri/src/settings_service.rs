@@ -2,6 +2,8 @@ use tauri::AppHandle;
 use tauri_plugin_autostart::ManagerExt as _;
 
 use crate::cli;
+use crate::models::normalize_api_proxy_gpt55_auto_compact_token_limit;
+use crate::models::normalize_api_proxy_gpt55_context_window;
 use crate::models::AppSettings;
 use crate::models::AppSettingsPatch;
 use crate::state::AppState;
@@ -24,6 +26,11 @@ pub(crate) async fn get_app_settings_internal(
         store.settings.codex_launch_path = None;
         save_store(app, &store)?;
     }
+    store.settings.api_proxy_gpt55_context_window =
+        store.settings.normalized_api_proxy_gpt55_context_window();
+    store.settings.api_proxy_gpt55_auto_compact_token_limit = store
+        .settings
+        .normalized_api_proxy_gpt55_auto_compact_token_limit();
     Ok(store.settings)
 }
 
@@ -74,6 +81,20 @@ pub(crate) async fn update_app_settings_internal(
         if let Some(value) = patch.api_proxy_port {
             store.settings.api_proxy_port = value;
         }
+        if let Some(value) = patch.api_proxy_gpt55_context_window {
+            store.settings.api_proxy_gpt55_context_window =
+                normalize_api_proxy_gpt55_context_window(value);
+        }
+        if let Some(value) = patch.api_proxy_gpt55_auto_compact_token_limit {
+            store.settings.api_proxy_gpt55_auto_compact_token_limit =
+                normalize_api_proxy_gpt55_auto_compact_token_limit(
+                    value,
+                    store.settings.api_proxy_gpt55_context_window,
+                );
+        }
+        store.settings.api_proxy_gpt55_auto_compact_token_limit = store
+            .settings
+            .normalized_api_proxy_gpt55_auto_compact_token_limit();
         if let Some(value) = patch.remote_servers {
             store.settings.remote_servers = value;
         }
@@ -145,7 +166,9 @@ fn normalize_codex_launch_path(value: Option<String>) -> Option<String> {
     })
 }
 
-fn normalize_codex_launch_path_for_storage(value: Option<String>) -> Result<Option<String>, String> {
+fn normalize_codex_launch_path_for_storage(
+    value: Option<String>,
+) -> Result<Option<String>, String> {
     let normalized = normalize_codex_launch_path(value);
     if normalized
         .as_deref()
@@ -159,5 +182,6 @@ fn normalize_codex_launch_path_for_storage(value: Option<String>) -> Result<Opti
 }
 
 fn should_discard_codex_launch_path(path: &str) -> bool {
-    cli::is_windows_store_codex_path(std::path::Path::new(path)) && cli::has_windows_store_codex_app()
+    cli::is_windows_store_codex_path(std::path::Path::new(path))
+        && cli::has_windows_store_codex_app()
 }

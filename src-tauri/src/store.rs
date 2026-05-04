@@ -14,8 +14,8 @@ use crate::auth::current_auth_account_key;
 use crate::auth::extract_auth;
 use crate::auth::read_current_codex_auth_optional;
 use crate::auth::write_active_codex_auth;
-use crate::models::AccountSourceKind;
 use crate::models::dedupe_account_variants;
+use crate::models::AccountSourceKind;
 use crate::models::AccountsStore;
 use crate::models::StoredAccount;
 use crate::profile_files;
@@ -157,6 +157,7 @@ pub(crate) fn sync_current_auth_account_on_startup_in_path(path: &Path) -> Resul
     let stored = StoredAccount {
         id: Uuid::new_v4().to_string(),
         label,
+        enabled: true,
         source_kind: Default::default(),
         principal_id: Some(extracted.principal_id),
         email: extracted.email,
@@ -610,6 +611,7 @@ mod tests {
             accounts: vec![StoredAccount {
                 id: format!("id-{label}"),
                 label: label.to_string(),
+                enabled: true,
                 source_kind: Default::default(),
                 principal_id: Some(format!("{label}@example.com")),
                 email: Some(format!("{label}@example.com")),
@@ -701,6 +703,7 @@ mod tests {
             accounts: vec![StoredAccount {
                 id: "legacy".to_string(),
                 label: "legacy".to_string(),
+                enabled: true,
                 source_kind: Default::default(),
                 principal_id: None,
                 email: Some("legacy@example.com".to_string()),

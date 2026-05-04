@@ -134,6 +134,10 @@ export type MessageCatalog = {
     currentBadge: string;
     launch: string;
     launching: string;
+    enableAccount: string;
+    disableAccount: string;
+    disabledBadge: string;
+    disabledStamp: string;
     apiBadge: string;
     profileIncomplete: string;
     validationFailed: string;
@@ -165,6 +169,7 @@ export type MessageCatalog = {
     ariaLabel: string;
     accounts: string;
     proxy: string;
+    dashboard: string;
     settings: string;
   };
   apiProxy: {
@@ -179,6 +184,18 @@ export type MessageCatalog = {
     defaultStartLabel: string;
     defaultStartEnabled: string;
     defaultStartDisabled: string;
+    gpt55ContextLabel: string;
+    gpt55ContextAriaLabel: string;
+    gpt55ContextOfficial: string;
+    gpt55ContextConservative: string;
+    gpt55ContextCustom: string;
+    gpt55ContextCustomAriaLabel: string;
+    gpt55AutoCompactLabel: string;
+    gpt55AutoCompactAriaLabel: string;
+    gpt55AutoCompactRecommended: string;
+    gpt55AutoCompactEarly: string;
+    gpt55AutoCompactCustom: string;
+    gpt55AutoCompactCustomAriaLabel: string;
     portInputAriaLabel: string;
     refreshStatus: string;
     stop: string;
@@ -439,6 +456,9 @@ export type MessageCatalog = {
     deleteConfirm: (label: string) => string;
     accountDeleted: string;
     deleteFailed: (error: string) => string;
+    accountEnabled: (label: string) => string;
+    accountDisabled: (label: string) => string;
+    accountToggleFailed: (error: string) => string;
     switchedOnly: string;
     switchedAndLaunchByCli: string;
     switchedAndLaunching: string;
@@ -574,6 +594,10 @@ function compileLocale(raw: RawMessageCatalog): MessageCatalog {
         fillTemplate(raw.notices.accountsExportFailed, { error }),
       deleteConfirm: (label) => fillTemplate(raw.notices.deleteConfirm, { label }),
       deleteFailed: (error) => fillTemplate(raw.notices.deleteFailed, { error }),
+      accountEnabled: (label) => fillTemplate(raw.notices.accountEnabled, { label }),
+      accountDisabled: (label) => fillTemplate(raw.notices.accountDisabled, { label }),
+      accountToggleFailed: (error) =>
+        fillTemplate(raw.notices.accountToggleFailed, { error }),
       opencodeSyncFailed: (base, error) =>
         fillTemplate(raw.notices.opencodeSyncFailed, { base, error }),
       opencodeSynced: (base) => fillTemplate(raw.notices.opencodeSynced, { base }),

@@ -123,7 +123,8 @@ pub(crate) async fn create_api_account_internal(
     let (last_validated_at, balance_text, profile_last_validation_error) = if input.force_save {
         (None, None, None)
     } else {
-        let balance = profile_files::validate_relay_target(&base_url, &api_key, &model_name).await?;
+        let balance =
+            profile_files::validate_relay_target(&base_url, &api_key, &model_name).await?;
         (Some(now_unix_seconds()), balance, None)
     };
 
@@ -138,6 +139,7 @@ pub(crate) async fn create_api_account_internal(
         let mut stored = StoredAccount {
             id: id.clone(),
             label,
+            enabled: true,
             source_kind: AccountSourceKind::Relay,
             principal_id: None,
             email: None,
@@ -382,6 +384,46 @@ pub(crate) async fn update_account_label_internal(
     Ok(resolved_label)
 }
 
+pub(crate) async fn set_account_enabled_internal(
+    app: &AppHandle,
+    state: &AppState,
+    account_key: &str,
+    enabled: bool,
+) -> Result<Vec<AccountSummary>, String> {
+    let now = now_unix_seconds();
+    let _guard = state.store_lock.lock().await;
+    let mut store = load_store(app)?;
+    let current_account_key = current_auth_account_key();
+    let current_variant_key = current_auth_variant_key();
+    let mut updated = false;
+
+    for account in store
+        .accounts
+        .iter_mut()
+        .filter(|account| account.account_key() == account_key)
+    {
+        account.enabled = enabled;
+        account.updated_at = now;
+        updated = true;
+    }
+
+    if !updated {
+        return Err("未找到要设置启用状态的账号".to_string());
+    }
+
+    save_store(app, &store)?;
+    Ok(store
+        .accounts
+        .iter()
+        .map(|account| {
+            account.to_summary(
+                current_account_key.as_deref(),
+                current_variant_key.as_deref(),
+            )
+        })
+        .collect())
+}
+
 /// 拉取并刷新所有账号用量，返回可直接用于前端/状态栏显示的摘要。
 ///
 /// 为避免“后台刷新覆盖新增账号”的竞态：
@@ -519,6 +561,9 @@ fn build_refresh_targets(
 
     for account in accounts {
         if matches!(account.source_kind, AccountSourceKind::Relay) {
+            continue;
+        }
+        if !account.enabled {
             continue;
         }
 
@@ -916,7 +961,11 @@ async fn commit_prepared_import(
             current_variant_key.as_deref(),
         );
         let store_path = account_store_path_from_data_dir(&app_paths::app_data_dir(app)?);
-        if let Some(account) = store.accounts.iter_mut().find(|account| account.id == summary.id) {
+        if let Some(account) = store
+            .accounts
+            .iter_mut()
+            .find(|account| account.id == summary.id)
+        {
             profile_files::sync_account_profile_in_store_path(&store_path, account)?;
         }
         save_store(app, &store)?;
@@ -1123,6 +1172,7 @@ fn upsert_prepared_import(
         let stored = StoredAccount {
             id: uuid::Uuid::new_v4().to_string(),
             label: resolved_label,
+            enabled: true,
             source_kind: AccountSourceKind::Chatgpt,
             principal_id: Some(principal_id.clone()),
             email,
@@ -1154,6 +1204,7 @@ fn upsert_prepared_import(
         let stored = StoredAccount {
             id: uuid::Uuid::new_v4().to_string(),
             label: resolved_label,
+            enabled: true,
             source_kind: AccountSourceKind::Chatgpt,
             principal_id: Some(principal_id),
             email,
@@ -1258,19 +1309,16 @@ fn validate_reauthorization_target(
         }
     }
 
-    if existing
-        .principal_id
-        .as_deref()
-        .is_some_and(|value| value.trim().eq_ignore_ascii_case(prepared.principal_id.trim()))
-        || existing.account_id == prepared.account_id
+    if existing.principal_id.as_deref().is_some_and(|value| {
+        value
+            .trim()
+            .eq_ignore_ascii_case(prepared.principal_id.trim())
+    }) || existing.account_id == prepared.account_id
     {
         return Ok(());
     }
 
-    let target_label = existing
-        .email
-        .as_deref()
-        .unwrap_or(existing.label.as_str());
+    let target_label = existing.email.as_deref().unwrap_or(existing.label.as_str());
     let new_label = prepared
         .email
         .as_deref()
@@ -1472,9 +1520,10 @@ fn normalize_import_source(source: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::build_refresh_targets;
+    use super::expand_import_json_content;
     use super::normalize_usage_error_message;
     use super::should_suspend_auth_keepalive;
-    use super::expand_import_json_content;
     use super::upsert_prepared_import;
     use super::PreparedImport;
     use super::AUTH_EXPIRED_NOTICE;
@@ -1638,6 +1687,7 @@ mod tests {
         store.accounts.push(StoredAccount {
             id: "existing".to_string(),
             label: "placeholder".to_string(),
+            enabled: true,
             source_kind: Default::default(),
             principal_id: Some("fresh@example.com".to_string()),
             email: Some("fresh@example.com".to_string()),
@@ -1750,6 +1800,18 @@ mod tests {
     }
 
     #[test]
+    fn build_refresh_targets_skips_disabled_accounts() {
+        let mut disabled = stored_test_account("disabled", "disabled@example.com", 2);
+        disabled.enabled = false;
+        let enabled = stored_test_account("enabled", "enabled@example.com", 1);
+
+        let targets = build_refresh_targets(vec![disabled, enabled], None);
+
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].account_key, "enabled@example.com|workspace-1");
+    }
+
+    #[test]
     fn refresh_failures_suspend_keepalive_for_invalid_grant_refresh_token() {
         let error = r#"刷新登录令牌失败 https://auth.openai.com/oauth/token -> 400 Bad Request: {"error":"invalid_grant","error_description":"Refresh token expired"}"#;
 
@@ -1763,5 +1825,36 @@ mod tests {
 
         assert!(should_suspend_auth_keepalive(error));
         assert_eq!(normalize_usage_error_message(error), AUTH_EXPIRED_NOTICE);
+    }
+
+    fn stored_test_account(id: &str, email: &str, updated_at: i64) -> StoredAccount {
+        StoredAccount {
+            id: id.to_string(),
+            label: id.to_string(),
+            enabled: true,
+            source_kind: Default::default(),
+            principal_id: Some(email.to_string()),
+            email: Some(email.to_string()),
+            account_id: "workspace-1".to_string(),
+            plan_type: Some("plus".to_string()),
+            auth_json: json!({ "kind": id }),
+            api_base_url: None,
+            api_key: None,
+            model_name: None,
+            balance_text: None,
+            profile_auth_path: None,
+            profile_config_path: None,
+            profile_auth_ready: false,
+            profile_config_ready: false,
+            profile_integrity_error: None,
+            profile_last_validated_at: None,
+            profile_last_validation_error: None,
+            added_at: updated_at - 1,
+            updated_at,
+            usage: None,
+            usage_error: None,
+            auth_refresh_blocked: false,
+            auth_refresh_error: None,
+        }
     }
 }

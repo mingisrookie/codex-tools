@@ -12,6 +12,7 @@ use std::pin::Pin;
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::RwLock;
+use std::time::Instant;
 
 use async_stream::stream;
 use axum::body::Body;
@@ -59,7 +60,11 @@ use tauri::AppHandle;
 use crate::app_paths;
 use crate::auth::extract_auth;
 use crate::auth::refresh_chatgpt_auth_tokens_serialized;
+use crate::dashboard_metrics;
+use crate::dashboard_metrics::DashboardMetricEvent;
+use crate::dashboard_metrics::DashboardTokenUsage;
 use crate::models::ApiProxyStatus;
+use crate::models::AppSettings;
 use crate::models::StoredAccount;
 use crate::models::UsageSnapshot;
 use crate::models::UsageWindow;
@@ -88,6 +93,10 @@ const CODEX_CLIENT_VERSION: &str = "0.125.0";
 const CODEX_USER_AGENT: &str = "codex_cli_rs/0.125.0";
 const RESPONSES_WEBSOCKETS_BETA: &str = "responses_websockets=2026-02-06";
 const SSE_DONE: &str = "data: [DONE]\n\n";
+const GPT_5_5_MODEL_ID: &str = "gpt-5.5";
+const GPT_5_5_MAX_OUTPUT_TOKENS: u64 = 128_000;
+const GPT_5_5_EFFECTIVE_CONTEXT_PERCENT: u64 = 100;
+const CODEX_CATALOG_EFFECTIVE_CONTEXT_PERCENT: u64 = 100;
 const DEFAULT_IMAGE_CONTROLLER_MODEL: &str = "gpt-5.5";
 const DEFAULT_IMAGE_TOOL_MODEL: &str = "gpt-image-2";
 const IMAGE_VARIATION_PROMPT: &str = "Create a faithful variation of the provided image.";
@@ -136,6 +145,7 @@ pub(crate) struct ProxyStorageContext {
 struct ProxyCandidate {
     id: String,
     label: String,
+    enabled: bool,
     account_key: String,
     account_id: String,
     access_token: String,
@@ -166,6 +176,183 @@ struct HttpProxyConfig {
 }
 
 type UpstreamByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, String>> + Send>>;
+
+#[derive(Clone)]
+struct ResponsesTrace {
+    id: String,
+    log_path: PathBuf,
+    data_dir: PathBuf,
+    started_at: Instant,
+    request_bytes: usize,
+    dashboard_id: String,
+    model: Arc<RwLock<Option<String>>>,
+    account_label: Arc<RwLock<Option<String>>>,
+    upstream_headers_ms: Arc<RwLock<Option<u64>>>,
+    first_chunk_ms: Arc<RwLock<Option<u64>>>,
+    tokens: Arc<RwLock<DashboardTokenUsage>>,
+}
+
+impl ResponsesTrace {
+    fn new(request_bytes: usize, data_dir: &Path) -> Self {
+        Self {
+            id: uuid::Uuid::new_v4().to_string(),
+            log_path: data_dir.join("logs").join("api-proxy-trace.log"),
+            data_dir: data_dir.to_path_buf(),
+            started_at: Instant::now(),
+            request_bytes,
+            dashboard_id: dashboard_metrics::begin_in_flight_request("/v1/responses", None),
+            model: Arc::new(RwLock::new(None)),
+            account_label: Arc::new(RwLock::new(None)),
+            upstream_headers_ms: Arc::new(RwLock::new(None)),
+            first_chunk_ms: Arc::new(RwLock::new(None)),
+            tokens: Arc::new(RwLock::new(DashboardTokenUsage::default())),
+        }
+    }
+
+    fn elapsed_ms(&self) -> u128 {
+        self.started_at.elapsed().as_millis()
+    }
+
+    fn elapsed_ms_u64(&self) -> u64 {
+        self.elapsed_ms().min(u128::from(u64::MAX)) as u64
+    }
+
+    fn log(&self, phase: &str, details: impl AsRef<str>) {
+        dashboard_metrics::update_in_flight_phase(&self.dashboard_id, phase);
+        let details = details.as_ref().replace('\r', " ").replace('\n', " ");
+        let line = if details.is_empty() {
+            format!(
+                "ts={} responses_trace id={} phase={} elapsed_ms={} request_bytes={}\n",
+                now_unix_seconds(),
+                self.id,
+                phase,
+                self.elapsed_ms(),
+                self.request_bytes,
+            )
+        } else {
+            format!(
+                "ts={} responses_trace id={} phase={} elapsed_ms={} request_bytes={} {}\n",
+                now_unix_seconds(),
+                self.id,
+                phase,
+                self.elapsed_ms(),
+                self.request_bytes,
+                details,
+            )
+        };
+
+        if let Some(parent) = self.log_path.parent() {
+            let _ = fs::create_dir_all(parent);
+        }
+        if let Ok(mut file) = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.log_path)
+        {
+            let _ = file.write_all(line.as_bytes());
+        }
+
+        if details.is_empty() {
+            log::info!(
+                target: "codex_tools::api_proxy_trace",
+                "responses_trace id={} phase={} elapsed_ms={} request_bytes={}",
+                self.id,
+                phase,
+                self.elapsed_ms(),
+                self.request_bytes,
+            );
+        } else {
+            log::info!(
+                target: "codex_tools::api_proxy_trace",
+                "responses_trace id={} phase={} elapsed_ms={} request_bytes={} {}",
+                self.id,
+                phase,
+                self.elapsed_ms(),
+                self.request_bytes,
+                details,
+            );
+        }
+    }
+
+    fn set_model(&self, model: Option<String>) {
+        if let Ok(mut guard) = self.model.write() {
+            *guard = model.clone();
+        }
+        dashboard_metrics::update_in_flight_model(&self.dashboard_id, model);
+    }
+
+    fn set_account_label(&self, label: Option<String>) {
+        if let Ok(mut guard) = self.account_label.write() {
+            *guard = label.clone();
+        }
+        dashboard_metrics::update_in_flight_account(&self.dashboard_id, label);
+    }
+
+    fn set_upstream_headers_now(&self) {
+        if let Ok(mut guard) = self.upstream_headers_ms.write() {
+            *guard = Some(self.elapsed_ms_u64());
+        }
+    }
+
+    fn set_first_chunk_now(&self) {
+        if let Ok(mut guard) = self.first_chunk_ms.write() {
+            if guard.is_none() {
+                *guard = Some(self.elapsed_ms_u64());
+            }
+        }
+    }
+
+    fn observe_sse_data(&self, data: &str) {
+        let Some(tokens) = dashboard_metrics::token_usage_from_sse_data(data) else {
+            return;
+        };
+        if tokens.total_tokens == 0 && tokens.input_tokens == 0 && tokens.output_tokens == 0 {
+            return;
+        }
+        if let Ok(mut guard) = self.tokens.write() {
+            *guard = tokens;
+        }
+    }
+
+    fn set_tokens_from_usage(&self, usage: Option<&Value>) {
+        let tokens = dashboard_metrics::token_usage_from_response_usage(usage);
+        if let Ok(mut guard) = self.tokens.write() {
+            *guard = tokens;
+        }
+    }
+
+    fn finish(&self, status_code: Option<u16>, error_kind: Option<&str>) {
+        let total_ms = self.elapsed_ms_u64();
+        let first_chunk_ms = self.first_chunk_ms.read().ok().and_then(|value| *value);
+        let event = DashboardMetricEvent {
+            finished_at: now_unix_seconds(),
+            endpoint: "/v1/responses".to_string(),
+            model: self.model.read().ok().and_then(|value| value.clone()),
+            account_label: self
+                .account_label
+                .read()
+                .ok()
+                .and_then(|value| value.clone()),
+            status_code,
+            error_kind: error_kind.map(ToString::to_string),
+            total_ms,
+            upstream_headers_ms: self
+                .upstream_headers_ms
+                .read()
+                .ok()
+                .and_then(|value| *value),
+            first_chunk_ms,
+            stream_ms: first_chunk_ms.map(|value| total_ms.saturating_sub(value)),
+            tokens: self
+                .tokens
+                .read()
+                .map(|value| value.clone())
+                .unwrap_or_default(),
+        };
+        dashboard_metrics::record_metric_event(&self.data_dir, event);
+        dashboard_metrics::finish_in_flight_request(&self.dashboard_id);
+    }
+}
 
 enum CodexUpstreamResponse {
     Http(reqwest::Response),
@@ -543,21 +730,192 @@ async fn models_handler(
         return response;
     }
 
-    Json(json!({
+    Json(build_models_response(Some(
+        read_gpt55_model_settings(&context.storage).await,
+    )))
+    .into_response()
+}
+
+async fn read_gpt55_model_settings(storage: &ProxyStorageContext) -> AppSettings {
+    let _guard = storage.store_lock.lock().await;
+    let store_path = account_store_path_from_data_dir(&storage.data_dir);
+    load_store_from_path(&store_path)
+        .map(|store| store.settings)
+        .unwrap_or_default()
+}
+
+fn build_models_response(settings: Option<AppSettings>) -> Value {
+    let settings = settings.unwrap_or_default();
+    let gpt55_context_window = settings.normalized_api_proxy_gpt55_context_window();
+    let gpt55_auto_compact_token_limit =
+        settings.normalized_api_proxy_gpt55_auto_compact_token_limit();
+
+    json!({
         "object": "list",
         "data": MODELS
             .iter()
             .map(|model| {
-                json!({
-                    "id": model,
-                    "object": "model",
-                    "created": 0,
-                    "owned_by": "openai",
-                })
+                build_model_response(
+                    model,
+                    gpt55_context_window,
+                    gpt55_auto_compact_token_limit,
+                )
             })
             .collect::<Vec<_>>(),
-    }))
-    .into_response()
+        "models": MODELS
+            .iter()
+            .filter(|model| is_codex_catalog_model(model))
+            .map(|model| {
+                build_codex_model_catalog_response(
+                    model,
+                    gpt55_context_window,
+                    gpt55_auto_compact_token_limit,
+                )
+            })
+            .collect::<Vec<_>>(),
+    })
+}
+
+fn is_codex_catalog_model(model: &str) -> bool {
+    !model.contains("image")
+}
+
+fn build_model_response(
+    model: &str,
+    gpt55_context_window: u64,
+    gpt55_auto_compact_token_limit: u64,
+) -> Value {
+    let mut entry = json!({
+        "id": model,
+        "object": "model",
+        "created": 0,
+        "owned_by": "openai",
+    });
+
+    if model == GPT_5_5_MODEL_ID {
+        if let Some(object) = entry.as_object_mut() {
+            object.insert("context_window".to_string(), json!(gpt55_context_window));
+            object.insert(
+                "model_context_window".to_string(),
+                json!(gpt55_context_window),
+            );
+            object.insert(
+                "max_output_tokens".to_string(),
+                json!(GPT_5_5_MAX_OUTPUT_TOKENS),
+            );
+            object.insert(
+                "effective_context_window_percent".to_string(),
+                json!(GPT_5_5_EFFECTIVE_CONTEXT_PERCENT),
+            );
+            object.insert(
+                "auto_compact_token_limit".to_string(),
+                json!(gpt55_auto_compact_token_limit),
+            );
+        }
+    }
+
+    entry
+}
+
+fn build_codex_model_catalog_response(
+    model: &str,
+    gpt55_context_window: u64,
+    gpt55_auto_compact_token_limit: u64,
+) -> Value {
+    let context_window = if model == GPT_5_5_MODEL_ID {
+        gpt55_context_window
+    } else {
+        272_000
+    };
+    let compact_limit = if model == GPT_5_5_MODEL_ID {
+        gpt55_auto_compact_token_limit
+    } else {
+        context_window
+    };
+
+    json!({
+        "slug": model,
+        "display_name": codex_model_display_name(model),
+        "description": codex_model_description(model),
+        "default_reasoning_level": "medium",
+        "supported_reasoning_levels": [
+            {
+                "effort": "low",
+                "description": "Fast responses with lighter reasoning",
+            },
+            {
+                "effort": "medium",
+                "description": "Balances speed and reasoning depth for everyday tasks",
+            },
+            {
+                "effort": "high",
+                "description": "Greater reasoning depth for complex problems",
+            },
+            {
+                "effort": "xhigh",
+                "description": "Extra high reasoning depth for complex problems",
+            },
+        ],
+        "shell_type": "shell_command",
+        "visibility": "list",
+        "supported_in_api": true,
+        "priority": 0,
+        "additional_speed_tiers": if model == GPT_5_5_MODEL_ID { json!(["fast"]) } else { json!([]) },
+        "availability_nux": null,
+        "upgrade": null,
+        "base_instructions": "You are Codex, a coding agent based on GPT-5. You and the user share one workspace, and your job is to collaborate with them until their goal is genuinely handled.",
+        "supports_reasoning_summaries": true,
+        "default_reasoning_summary": "none",
+        "support_verbosity": true,
+        "default_verbosity": "low",
+        "apply_patch_tool_type": "freeform",
+        "web_search_tool_type": "text_and_image",
+        "truncation_policy": {
+            "mode": "tokens",
+            "limit": 10000,
+        },
+        "supports_parallel_tool_calls": true,
+        "supports_image_detail_original": true,
+        "context_window": context_window,
+        "max_context_window": context_window,
+        "effective_context_window_percent": CODEX_CATALOG_EFFECTIVE_CONTEXT_PERCENT,
+        "auto_compact_token_limit": compact_limit,
+        "experimental_supported_tools": [],
+        "input_modalities": [
+            "text",
+            "image",
+        ],
+        "supports_search_tool": true,
+    })
+}
+
+fn codex_model_display_name(model: &str) -> &str {
+    match model {
+        "gpt-5.5" => "GPT-5.5",
+        "gpt-5.4" => "GPT-5.4",
+        "gpt-5.3-codex-spark" => "GPT-5.3 Codex Spark",
+        "gpt-5.3-codex" => "GPT-5.3 Codex",
+        "gpt-5.2-codex" => "GPT-5.2 Codex",
+        "gpt-5.1-codex-max" => "GPT-5.1 Codex Max",
+        "gpt-5.1-codex-mini" => "GPT-5.1 Codex Mini",
+        "gpt-5.1-codex" => "GPT-5.1 Codex",
+        "gpt-5-codex-mini" => "GPT-5 Codex Mini",
+        "gpt-5-codex" => "GPT-5 Codex",
+        "gpt-5-mini" => "GPT-5 Mini",
+        "gpt-5" => "GPT-5",
+        _ => model,
+    }
+}
+
+fn codex_model_description(model: &str) -> &str {
+    match model {
+        "gpt-5.5" => "Frontier model for complex coding, research, and real-world work.",
+        "gpt-5.3-codex-spark" => "Fast triage, explore, and lightweight synthesis model.",
+        model if model.contains("mini") => {
+            "Small, fast, and cost-efficient model for simpler coding tasks."
+        }
+        _ => "Codex-capable model for coding and agentic work.",
+    }
 }
 
 async fn chat_completions_handler(
@@ -629,46 +987,116 @@ async fn responses_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
+    let trace = ResponsesTrace::new(body.len(), &context.storage.data_dir);
+    trace.log("request_received", "route=/v1/responses");
+
     if let Some(response) = ensure_authorized(&headers, &context.api_key) {
+        trace.log("auth_failed", "");
+        trace.finish(Some(StatusCode::UNAUTHORIZED.as_u16()), Some("auth_failed"));
         return response;
     }
 
     let request_json = match parse_json_request(&body) {
         Ok(value) => value,
-        Err(response) => return response,
+        Err(response) => {
+            trace.log("parse_failed", "");
+            trace.finish(Some(StatusCode::BAD_REQUEST.as_u16()), Some("parse_failed"));
+            return response;
+        }
     };
 
     let (upstream_payload, downstream_stream) =
         match normalize_openai_responses_request(request_json) {
-            Ok(value) => value,
-            Err(message) => return invalid_request_response(&message),
+            Ok(value) => {
+                let model = value
+                    .0
+                    .get("model")
+                    .and_then(Value::as_str)
+                    .unwrap_or("unknown");
+                trace.log(
+                    "normalized",
+                    format!("model={model} downstream_stream={}", value.1),
+                );
+                trace.set_model(Some(model.to_string()));
+                value
+            }
+            Err(message) => {
+                trace.log(
+                    "normalize_failed",
+                    format!("error={}", truncate_for_error(&message, 200)),
+                );
+                trace.finish(
+                    Some(StatusCode::BAD_REQUEST.as_u16()),
+                    Some("normalize_failed"),
+                );
+                return invalid_request_response(&message);
+            }
         };
 
+    trace.log("upstream_request_start", "");
     let upstream =
         match send_codex_request_over_candidates(&context, &headers, &upstream_payload).await {
             Ok(value) => value,
-            Err(response) => return response,
+            Err(response) => {
+                trace.log("upstream_request_failed", "");
+                trace.finish(
+                    Some(response.status().as_u16()),
+                    Some("upstream_request_failed"),
+                );
+                return response;
+            }
         };
 
     let (candidate, upstream_response) = upstream;
+    trace.set_account_label(Some(candidate.label.clone()));
+    trace.set_upstream_headers_now();
+    trace.log(
+        "upstream_headers_received",
+        format!(
+            "candidate_label={} status={} downstream_stream={downstream_stream}",
+            truncate_for_error(&candidate.label, 80),
+            upstream_response.status(),
+        ),
+    );
     update_proxy_target(&context, &candidate).await;
     update_proxy_error(&context, None).await;
 
     if downstream_stream {
-        build_passthrough_sse_response(upstream_response)
+        build_passthrough_sse_response(upstream_response, trace)
     } else {
+        trace.log("non_stream_body_read_start", "");
         let (upstream_headers, upstream_body) = match upstream_response.into_bytes().await {
             Ok(value) => value,
             Err(error) => {
+                trace.log(
+                    "non_stream_body_read_failed",
+                    format!("error={}", truncate_for_error(&error, 200)),
+                );
+                trace.finish(
+                    Some(StatusCode::BAD_GATEWAY.as_u16()),
+                    Some("non_stream_body_read_failed"),
+                );
                 let message = format!("读取 Codex 上游响应失败: {error}");
                 update_proxy_error(&context, Some(message.clone())).await;
                 return json_error_response(StatusCode::BAD_GATEWAY, &message);
             }
         };
+        trace.log(
+            "non_stream_body_read_finished",
+            format!("upstream_bytes={}", upstream_body.len()),
+        );
 
         let completed = match extract_completed_response_from_sse(&upstream_body) {
             Ok(value) => value,
             Err(message) => {
+                trace.log(
+                    "non_stream_extract_failed",
+                    format!("error={}", truncate_for_error(&message, 200)),
+                );
+                trace.finish(
+                    Some(StatusCode::BAD_GATEWAY.as_u16()),
+                    Some("non_stream_extract_failed"),
+                );
                 update_proxy_error(&context, Some(message.clone())).await;
                 return json_error_response(StatusCode::BAD_GATEWAY, &message);
             }
@@ -678,12 +1106,26 @@ async fn responses_handler(
         let body = match serde_json::to_vec(&completed) {
             Ok(bytes) => Bytes::from(bytes),
             Err(error) => {
+                trace.log(
+                    "non_stream_serialize_failed",
+                    format!("error={}", truncate_for_error(&error.to_string(), 200)),
+                );
+                trace.finish(
+                    Some(StatusCode::BAD_GATEWAY.as_u16()),
+                    Some("non_stream_serialize_failed"),
+                );
                 let message = format!("序列化 responses 响应失败: {error}");
                 update_proxy_error(&context, Some(message.clone())).await;
                 return json_error_response(StatusCode::BAD_GATEWAY, &message);
             }
         };
 
+        trace.log(
+            "non_stream_response_ready",
+            format!("body_bytes={}", body.len()),
+        );
+        trace.set_tokens_from_usage(completed.get("usage"));
+        trace.finish(Some(StatusCode::OK.as_u16()), None);
         build_json_proxy_response(StatusCode::OK, &upstream_headers, body)
     }
 }
@@ -2578,6 +3020,7 @@ async fn load_proxy_candidates(
     for candidate in store
         .accounts
         .into_iter()
+        .filter(|account| account.enabled)
         .filter_map(account_to_proxy_candidate)
     {
         match deduped.get(&candidate.account_key) {
@@ -2600,6 +3043,7 @@ fn account_to_proxy_candidate(account: StoredAccount) -> Option<ProxyCandidate> 
     Some(ProxyCandidate {
         id: account.id,
         label: account.label,
+        enabled: account.enabled,
         account_key,
         account_id: extracted.account_id,
         access_token: extracted.access_token,
@@ -2626,12 +3070,12 @@ fn should_replace_proxy_candidate(existing: &ProxyCandidate, candidate: &ProxyCa
 }
 
 fn compare_proxy_candidates(left: &ProxyCandidate, right: &ProxyCandidate) -> Ordering {
-    match right.auth_refresh_blocked.cmp(&left.auth_refresh_blocked) {
+    match left.auth_refresh_blocked.cmp(&right.auth_refresh_blocked) {
         Ordering::Equal => {}
         ordering => return ordering,
     }
 
-    match is_free_plan(&right.plan_type).cmp(&is_free_plan(&left.plan_type)) {
+    match is_free_plan(&left.plan_type).cmp(&is_free_plan(&right.plan_type)) {
         Ordering::Equal => {}
         ordering => return ordering,
     }
@@ -2725,6 +3169,7 @@ async fn refresh_proxy_candidate_auth(
     Ok(ProxyCandidate {
         id: candidate.id.clone(),
         label: candidate.label.clone(),
+        enabled: candidate.enabled,
         account_key: candidate.account_key.clone(),
         account_id: extracted.account_id,
         access_token: extracted.access_token,
@@ -3272,31 +3717,67 @@ fn build_json_proxy_response(
     build_proxy_response(status, upstream_headers, body)
 }
 
-fn build_passthrough_sse_response(upstream: CodexUpstreamResponse) -> Response<Body> {
+fn build_passthrough_sse_response(
+    upstream: CodexUpstreamResponse,
+    trace: ResponsesTrace,
+) -> Response<Body> {
     let (upstream_headers, mut upstream_stream) = upstream.into_stream();
+    trace.log("downstream_stream_start", "");
     let output = stream! {
         let mut decoder = SseDecoder::default();
+        let mut saw_first_chunk = false;
+        let mut chunk_count: u64 = 0;
+        let mut event_count: u64 = 0;
+        let mut upstream_bytes: usize = 0;
 
         while let Some(chunk) = upstream_stream.next().await {
             match chunk {
                 Ok(chunk) => {
+                    chunk_count += 1;
+                    upstream_bytes += chunk.len();
+                    if !saw_first_chunk {
+                        saw_first_chunk = true;
+                        trace.set_first_chunk_now();
+                        trace.log(
+                            "first_upstream_chunk",
+                            format!("chunk_bytes={}", chunk.len()),
+                        );
+                    }
                     for event in decoder.push(&chunk) {
+                        event_count += 1;
+                        trace.observe_sse_data(&event.data);
                         yield Ok::<Bytes, Infallible>(serialize_sse_event(
                             event.event.as_deref(),
                             &rewrite_sse_event_data_models_for_client(&event.data),
                         ));
                     }
                 }
-                Err(_) => return,
+                Err(error) => {
+                    trace.log(
+                        "upstream_stream_error",
+                        format!("error={}", truncate_for_error(&error, 200)),
+                    );
+                    trace.finish(None, Some("upstream_stream_error"));
+                    return;
+                }
             }
         }
 
         for event in decoder.finish() {
+            event_count += 1;
+            trace.observe_sse_data(&event.data);
             yield Ok::<Bytes, Infallible>(serialize_sse_event(
                 event.event.as_deref(),
                 &rewrite_sse_event_data_models_for_client(&event.data),
             ));
         }
+        trace.log(
+            "upstream_stream_end",
+            format!(
+                "chunks={chunk_count} events={event_count} upstream_bytes={upstream_bytes}",
+            ),
+        );
+        trace.finish(Some(StatusCode::OK.as_u16()), None);
     };
     let mut response = Response::builder().status(StatusCode::OK);
     for (name, value) in &upstream_headers {
@@ -4274,6 +4755,8 @@ fn parse_proxy_request_body_limit_mib(value: Option<&str>) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    use super::build_models_response;
+    use super::compare_proxy_candidates;
     use super::convert_completed_response_to_chat_completion;
     use super::convert_openai_chat_request_to_codex;
     use super::convert_openai_image_edit_request_to_codex;
@@ -4296,10 +4779,209 @@ mod tests {
     use super::websocket_target_host_port;
     use super::ChatStreamState;
     use super::ImageMultipartRequest;
+    use super::ProxyCandidate;
     use super::SseEvent;
     use super::DEFAULT_PROXY_REQUEST_BODY_LIMIT_BYTES;
+    use crate::models::AppSettings;
+    use crate::models::UsageSnapshot;
+    use crate::models::UsageWindow;
     use serde_json::json;
     use serde_json::Value;
+
+    fn model_by_id<'a>(models: &'a Value, id: &str) -> &'a Value {
+        models
+            .get("data")
+            .and_then(|value| value.as_array())
+            .and_then(|items| {
+                items.iter().find(|item| {
+                    item.get("id")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|model_id| model_id == id)
+                })
+            })
+            .expect("model should be present")
+    }
+
+    fn candidate(label: &str, plan_type: &str, used_percent: f64, blocked: bool) -> ProxyCandidate {
+        ProxyCandidate {
+            id: label.to_string(),
+            label: label.to_string(),
+            enabled: true,
+            account_key: label.to_string(),
+            account_id: label.to_string(),
+            access_token: "token".to_string(),
+            auth_json: json!({ "kind": label }),
+            variant_key: label.to_string(),
+            plan_type: Some(plan_type.to_string()),
+            usage: Some(UsageSnapshot {
+                fetched_at: 1,
+                plan_type: Some(plan_type.to_string()),
+                five_hour: Some(UsageWindow {
+                    used_percent,
+                    window_seconds: 18_000,
+                    reset_at: None,
+                }),
+                one_week: Some(UsageWindow {
+                    used_percent,
+                    window_seconds: 604_800,
+                    reset_at: None,
+                }),
+                credits: None,
+            }),
+            auth_refresh_blocked: blocked,
+            auth_refresh_error: None,
+            updated_at: 1,
+        }
+    }
+
+    #[test]
+    fn proxy_candidates_prefer_unblocked_paid_accounts() {
+        let mut candidates = vec![
+            candidate("free", "free", 0.0, false),
+            candidate("blocked-team", "team", 0.0, true),
+            candidate("plus", "plus", 20.0, false),
+        ];
+
+        candidates.sort_by(compare_proxy_candidates);
+
+        assert_eq!(candidates[0].label, "plus");
+        assert_eq!(candidates[1].label, "free");
+        assert_eq!(candidates[2].label, "blocked-team");
+    }
+
+    #[test]
+    fn models_response_exposes_default_gpt_5_5_context_metadata() {
+        let response = build_models_response(None);
+        let model = model_by_id(&response, "gpt-5.5");
+
+        assert_eq!(
+            model.get("context_window").and_then(|value| value.as_u64()),
+            Some(1_050_000)
+        );
+        assert_eq!(
+            model
+                .get("model_context_window")
+                .and_then(|value| value.as_u64()),
+            Some(1_050_000)
+        );
+        assert_eq!(
+            model
+                .get("max_output_tokens")
+                .and_then(|value| value.as_u64()),
+            Some(128_000)
+        );
+        assert_eq!(
+            model
+                .get("effective_context_window_percent")
+                .and_then(|value| value.as_u64()),
+            Some(100)
+        );
+        assert_eq!(
+            model
+                .get("auto_compact_token_limit")
+                .and_then(|value| value.as_u64()),
+            Some(650_000)
+        );
+    }
+
+    #[test]
+    fn models_response_uses_custom_gpt_5_5_context_window() {
+        let response = build_models_response(Some(AppSettings {
+            api_proxy_gpt55_context_window: 258_400,
+            ..Default::default()
+        }));
+        let model = model_by_id(&response, "gpt-5.5");
+
+        assert_eq!(
+            model.get("context_window").and_then(|value| value.as_u64()),
+            Some(258_400)
+        );
+        assert_eq!(
+            model
+                .get("model_context_window")
+                .and_then(|value| value.as_u64()),
+            Some(258_400)
+        );
+        assert_eq!(
+            model
+                .get("auto_compact_token_limit")
+                .and_then(|value| value.as_u64()),
+            Some(258_400)
+        );
+    }
+
+    #[test]
+    fn models_response_uses_custom_gpt_5_5_auto_compact_limit() {
+        let response = build_models_response(Some(AppSettings {
+            api_proxy_gpt55_auto_compact_token_limit: 500_000,
+            ..Default::default()
+        }));
+        let model = model_by_id(&response, "gpt-5.5");
+
+        assert_eq!(
+            model
+                .get("auto_compact_token_limit")
+                .and_then(|value| value.as_u64()),
+            Some(500_000)
+        );
+    }
+
+    #[test]
+    fn models_response_includes_codex_catalog_context_metadata() {
+        let response = build_models_response(Some(AppSettings {
+            api_proxy_gpt55_context_window: 1_050_000,
+            ..Default::default()
+        }));
+        let model = response
+            .get("models")
+            .and_then(|value| value.as_array())
+            .and_then(|models| {
+                models.iter().find(|model| {
+                    model
+                        .get("slug")
+                        .and_then(|value| value.as_str())
+                        .is_some_and(|slug| slug == "gpt-5.5")
+                })
+            })
+            .expect("gpt-5.5 catalog model should be present");
+
+        assert_eq!(
+            model.get("context_window").and_then(|value| value.as_u64()),
+            Some(1_050_000)
+        );
+        assert_eq!(
+            model
+                .get("max_context_window")
+                .and_then(|value| value.as_u64()),
+            Some(1_050_000)
+        );
+        assert_eq!(
+            model
+                .get("auto_compact_token_limit")
+                .and_then(|value| value.as_u64()),
+            Some(650_000)
+        );
+    }
+
+    #[test]
+    fn models_response_falls_back_for_invalid_gpt_5_5_context_window() {
+        let response = build_models_response(Some(AppSettings {
+            api_proxy_gpt55_context_window: 999,
+            ..Default::default()
+        }));
+        let model = model_by_id(&response, "gpt-5.5");
+
+        assert_eq!(
+            model.get("context_window").and_then(|value| value.as_u64()),
+            Some(1_050_000)
+        );
+        assert_eq!(
+            model
+                .get("model_context_window")
+                .and_then(|value| value.as_u64()),
+            Some(1_050_000)
+        );
+    }
 
     #[test]
     fn converts_chat_request_to_codex_payload() {

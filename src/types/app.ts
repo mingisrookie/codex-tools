@@ -50,6 +50,7 @@ export type AccountSourceKind = "chatgpt" | "relay";
 export type AccountSummary = {
   id: string;
   label: string;
+  enabled: boolean;
   sourceKind: AccountSourceKind;
   email: string | null;
   accountKey: string;
@@ -130,6 +131,96 @@ export type ApiProxyStatus = {
   activeAccountId: string | null;
   activeAccountLabel: string | null;
   lastError: string | null;
+};
+
+export type RuntimeDataInfo = {
+  dataDir: string;
+};
+
+export type DashboardTokenUsage = {
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  reasoningOutputTokens: number;
+  totalTokens: number;
+};
+
+export type DashboardLatencyStats = {
+  totalP50Ms: number | null;
+  totalP90Ms: number | null;
+  totalP95Ms: number | null;
+  upstreamHeadersP95Ms: number | null;
+  firstChunkP95Ms: number | null;
+  streamP95Ms: number | null;
+};
+
+export type DashboardDimensionStat = {
+  label: string;
+  requestCount: number;
+  failureCount: number;
+  totalTokens: number;
+  totalP95Ms: number | null;
+};
+
+export type DashboardTimelineBucket = {
+  startAt: number;
+  requestCount: number;
+  failureCount: number;
+  totalTokens: number;
+  totalP95Ms: number | null;
+  firstChunkP95Ms: number | null;
+};
+
+export type DashboardMetricEvent = {
+  finishedAt: number;
+  endpoint: string;
+  model: string | null;
+  accountLabel: string | null;
+  statusCode: number | null;
+  errorKind: string | null;
+  totalMs: number;
+  upstreamHeadersMs: number | null;
+  firstChunkMs: number | null;
+  streamMs: number | null;
+  tokens: DashboardTokenUsage;
+};
+
+export type DashboardInFlightRequest = {
+  id: string;
+  startedAt: number;
+  endpoint: string;
+  model: string | null;
+  accountLabel: string | null;
+  phase: string;
+  elapsedMs: number;
+};
+
+export type DashboardWindowStats = {
+  windowSeconds: number;
+  requestCount: number;
+  successCount: number;
+  failureCount: number;
+  failureRate: number;
+  cacheHitRate: number | null;
+  latency: DashboardLatencyStats;
+  tokens: DashboardTokenUsage;
+  statusCodes: Record<string, number>;
+  topModels: DashboardDimensionStat[];
+  topAccounts: DashboardDimensionStat[];
+  topEndpoints: DashboardDimensionStat[];
+  timeline: DashboardTimelineBucket[];
+};
+
+export type ApiProxyDashboardSnapshot = {
+  dataDir: string;
+  metricsPath: string;
+  updatedAt: number;
+  last10m: DashboardWindowStats;
+  last1h: DashboardWindowStats;
+  last24h: DashboardWindowStats;
+  inFlight: DashboardInFlightRequest[];
+  recentSlowRequests: DashboardMetricEvent[];
+  recentFailures: DashboardMetricEvent[];
 };
 
 export type RemoteAuthMode = "keyContent" | "keyFile" | "keyPath" | "password";
@@ -249,6 +340,8 @@ export type AppSettings = {
   restartEditorTargets: EditorAppId[];
   autoStartApiProxy: boolean;
   apiProxyPort: number;
+  apiProxyGpt55ContextWindow: number;
+  apiProxyGpt55AutoCompactTokenLimit: number;
   remoteServers: RemoteServerConfig[];
   locale: AppLocale;
   skippedUpdateVersion: string | null;

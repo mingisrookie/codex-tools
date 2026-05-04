@@ -13,6 +13,13 @@ import type {
 } from "../types/app";
 
 const DEFAULT_PROXY_PORT = "8787";
+const GPT55_CONTEXT_OFFICIAL_MAX = 1_050_000;
+const GPT55_CONTEXT_CONSERVATIVE = 258_400;
+const GPT55_CONTEXT_MIN = 1_000;
+const GPT55_CONTEXT_MAX = 1_050_000;
+const GPT55_AUTO_COMPACT_RECOMMENDED = 650_000;
+const GPT55_AUTO_COMPACT_EARLY = 500_000;
+const GPT55_AUTO_COMPACT_MIN = 1_000;
 const DEFAULT_REMOTE_SSH_PORT = "22";
 const DEFAULT_REMOTE_LISTEN_PORT = "8787";
 const REMOTE_DRAFTS_CACHE_KEY = "codex-tools:proxy-remote-drafts";
@@ -34,12 +41,17 @@ type RemoteServerDraft = {
   listenPort: string;
 };
 
+type Gpt55ContextPreset = "official" | "conservative" | "custom";
+type Gpt55AutoCompactPreset = "recommended" | "early" | "custom";
+
 type ApiProxyPanelProps = {
   status: ApiProxyStatus;
   cloudflaredStatus: CloudflaredStatus;
   accountCount: number;
   autoStartEnabled: boolean;
   savedPort: number;
+  gpt55ContextWindow: number;
+  gpt55AutoCompactTokenLimit: number;
   remoteServers: RemoteServerConfig[];
   remoteStatuses: Record<string, RemoteProxyStatus>;
   remoteLogs: Record<string, string>;
@@ -63,6 +75,8 @@ type ApiProxyPanelProps = {
   onRefresh: () => void;
   onToggleAutoStart: (enabled: boolean) => void;
   onPersistPort: (port: number) => Promise<void> | void;
+  onPersistGpt55ContextWindow: (contextWindow: number) => Promise<void> | void;
+  onPersistGpt55AutoCompactTokenLimit: (tokenLimit: number) => Promise<void> | void;
   onUpdateRemoteServers: (servers: RemoteServerConfig[]) => void;
   onRefreshRemoteStatus: (server: RemoteServerConfig) => void;
   onDeployRemote: (server: RemoteServerConfig) => void;
@@ -308,6 +322,62 @@ function formatRemoteHistoryTime(locale: string, timestamp: number) {
   }
 }
 
+function resolveGpt55ContextPreset(contextWindow: number): Gpt55ContextPreset {
+  if (contextWindow === GPT55_CONTEXT_OFFICIAL_MAX) {
+    return "official";
+  }
+  if (contextWindow === GPT55_CONTEXT_CONSERVATIVE) {
+    return "conservative";
+  }
+  return "custom";
+}
+
+function resolveGpt55AutoCompactPreset(tokenLimit: number, contextWindow: number): Gpt55AutoCompactPreset {
+  if (tokenLimit === Math.min(GPT55_AUTO_COMPACT_RECOMMENDED, contextWindow)) {
+    return "recommended";
+  }
+  if (tokenLimit === Math.min(GPT55_AUTO_COMPACT_EARLY, contextWindow)) {
+    return "early";
+  }
+  return "custom";
+}
+
+function parseGpt55ContextWindow(value: string) {
+  const normalized = value.replace(/,/g, "").trim();
+  if (!/^\d+$/.test(normalized)) {
+    return null;
+  }
+  const parsed = Number.parseInt(normalized, 10);
+  if (!Number.isInteger(parsed) || parsed < GPT55_CONTEXT_MIN || parsed > GPT55_CONTEXT_MAX) {
+    return null;
+  }
+  return parsed;
+}
+
+function parseGpt55AutoCompactTokenLimit(value: string, contextWindow: number) {
+  const normalized = value.replace(/,/g, "").trim();
+  if (!/^\d+$/.test(normalized)) {
+    return null;
+  }
+  const parsed = Number.parseInt(normalized, 10);
+  if (
+    !Number.isInteger(parsed) ||
+    parsed < GPT55_AUTO_COMPACT_MIN ||
+    parsed > contextWindow
+  ) {
+    return null;
+  }
+  return parsed;
+}
+
+function formatTokenCount(value: number, locale: string) {
+  try {
+    return new Intl.NumberFormat(locale).format(value);
+  } catch {
+    return String(value);
+  }
+}
+
 const REMOTE_AUTH_OPTIONS: MultiSelectOption<RemoteAuthMode>[] = [
   { id: "keyContent", label: "keyContent" },
   { id: "keyFile", label: "keyFile" },
@@ -321,6 +391,8 @@ export function ApiProxyPanel({
   accountCount,
   autoStartEnabled,
   savedPort,
+  gpt55ContextWindow,
+  gpt55AutoCompactTokenLimit,
   remoteServers,
   remoteStatuses,
   remoteLogs,
@@ -344,6 +416,8 @@ export function ApiProxyPanel({
   onRefresh,
   onToggleAutoStart,
   onPersistPort,
+  onPersistGpt55ContextWindow,
+  onPersistGpt55AutoCompactTokenLimit,
   onUpdateRemoteServers,
   onRefreshRemoteStatus,
   onDeployRemote,
@@ -372,6 +446,12 @@ export function ApiProxyPanel({
   const busy = starting || stopping;
   const cloudflaredBusy = installingCloudflared || startingCloudflared || stoppingCloudflared;
   const [portDraft, setPortDraft] = useState<string | null>(null);
+  const [gpt55ContextPresetDraft, setGpt55ContextPresetDraft] =
+    useState<Gpt55ContextPreset | null>(null);
+  const [gpt55ContextDraft, setGpt55ContextDraft] = useState("");
+  const [gpt55AutoCompactPresetDraft, setGpt55AutoCompactPresetDraft] =
+    useState<Gpt55AutoCompactPreset | null>(null);
+  const [gpt55AutoCompactDraft, setGpt55AutoCompactDraft] = useState("");
   const [publicAccessEnabled, setPublicAccessEnabled] = useState(cloudflaredStatus.running);
   const [tunnelMode, setTunnelMode] = useState<CloudflaredTunnelMode>(
     cloudflaredStatus.tunnelMode ?? "quick",
@@ -435,6 +515,30 @@ export function ApiProxyPanel({
       ? Number(rawPort)
       : null;
   const hasRemoteServers = effectiveRemoteDrafts.length > 0;
+  const gpt55ContextPreset = resolveGpt55ContextPreset(gpt55ContextWindow);
+  const activeGpt55ContextPreset = gpt55ContextPresetDraft ?? gpt55ContextPreset;
+  const effectiveGpt55ContextDraft =
+    gpt55ContextPresetDraft === "custom" ? gpt55ContextDraft : String(gpt55ContextWindow);
+  const customGpt55ContextWindow = parseGpt55ContextWindow(effectiveGpt55ContextDraft);
+  const gpt55ContextCustomInvalid =
+    activeGpt55ContextPreset === "custom" && customGpt55ContextWindow === null;
+  const effectiveGpt55ContextWindow = customGpt55ContextWindow ?? gpt55ContextWindow;
+  const gpt55AutoCompactPreset = resolveGpt55AutoCompactPreset(
+    gpt55AutoCompactTokenLimit,
+    gpt55ContextWindow,
+  );
+  const activeGpt55AutoCompactPreset =
+    gpt55AutoCompactPresetDraft ?? gpt55AutoCompactPreset;
+  const effectiveGpt55AutoCompactDraft =
+    gpt55AutoCompactPresetDraft === "custom"
+      ? gpt55AutoCompactDraft
+      : String(gpt55AutoCompactTokenLimit);
+  const customGpt55AutoCompactTokenLimit = parseGpt55AutoCompactTokenLimit(
+    effectiveGpt55AutoCompactDraft,
+    effectiveGpt55ContextWindow,
+  );
+  const gpt55AutoCompactCustomInvalid =
+    activeGpt55AutoCompactPreset === "custom" && customGpt55AutoCompactTokenLimit === null;
   const resolvedSelectedRemoteId =
     selectedRemoteId && effectiveRemoteDrafts.some((draft) => draft.id === selectedRemoteId)
       ? selectedRemoteId
@@ -554,6 +658,45 @@ export function ApiProxyPanel({
       return;
     }
     await onPersistPort(nextPort);
+  };
+
+  const persistGpt55ContextWindow = async (contextWindow: number) => {
+    setGpt55ContextPresetDraft(null);
+    if (contextWindow === gpt55ContextWindow) {
+      return;
+    }
+    await onPersistGpt55ContextWindow(contextWindow);
+  };
+
+  const persistCustomGpt55ContextWindow = async () => {
+    const nextContextWindow = parseGpt55ContextWindow(effectiveGpt55ContextDraft);
+    if (nextContextWindow === null) {
+      setGpt55ContextPresetDraft(null);
+      setGpt55ContextDraft(String(gpt55ContextWindow));
+      return;
+    }
+    await persistGpt55ContextWindow(nextContextWindow);
+  };
+
+  const persistGpt55AutoCompactTokenLimit = async (tokenLimit: number) => {
+    setGpt55AutoCompactPresetDraft(null);
+    if (tokenLimit === gpt55AutoCompactTokenLimit) {
+      return;
+    }
+    await onPersistGpt55AutoCompactTokenLimit(tokenLimit);
+  };
+
+  const persistCustomGpt55AutoCompactTokenLimit = async () => {
+    const nextTokenLimit = parseGpt55AutoCompactTokenLimit(
+      effectiveGpt55AutoCompactDraft,
+      effectiveGpt55ContextWindow,
+    );
+    if (nextTokenLimit === null) {
+      setGpt55AutoCompactPresetDraft(null);
+      setGpt55AutoCompactDraft(String(gpt55AutoCompactTokenLimit));
+      return;
+    }
+    await persistGpt55AutoCompactTokenLimit(nextTokenLimit);
   };
 
   const handleStart = async () => {
@@ -720,6 +863,146 @@ export function ApiProxyPanel({
                 disabled={busy || status.running}
               />
             </label>
+
+            <div className="proxyInlineSetting proxyContextSetting">
+              <span className="proxyInlineLabel">{proxyCopy.gpt55ContextLabel}</span>
+              <div className="proxyContextControl">
+                <div
+                  className="modeGroup proxyContextModes"
+                  role="radiogroup"
+                  aria-label={proxyCopy.gpt55ContextAriaLabel}
+                >
+                  <button
+                    type="button"
+                    className={activeGpt55ContextPreset === "official" ? "primary" : "ghost"}
+                    aria-pressed={activeGpt55ContextPreset === "official"}
+                    disabled={savingSettings}
+                    onClick={() => {
+                      void persistGpt55ContextWindow(GPT55_CONTEXT_OFFICIAL_MAX);
+                    }}
+                  >
+                    {proxyCopy.gpt55ContextOfficial}
+                  </button>
+                  <button
+                    type="button"
+                    className={activeGpt55ContextPreset === "conservative" ? "primary" : "ghost"}
+                    aria-pressed={activeGpt55ContextPreset === "conservative"}
+                    disabled={savingSettings}
+                    onClick={() => {
+                      void persistGpt55ContextWindow(GPT55_CONTEXT_CONSERVATIVE);
+                    }}
+                  >
+                    {proxyCopy.gpt55ContextConservative}
+                  </button>
+                  <button
+                    type="button"
+                    className={activeGpt55ContextPreset === "custom" ? "primary" : "ghost"}
+                    aria-pressed={activeGpt55ContextPreset === "custom"}
+                    disabled={savingSettings}
+                    onClick={() => {
+                      setGpt55ContextDraft(String(gpt55ContextWindow));
+                      setGpt55ContextPresetDraft("custom");
+                    }}
+                  >
+                    {proxyCopy.gpt55ContextCustom}
+                  </button>
+                </div>
+                {activeGpt55ContextPreset === "custom" ? (
+                  <input
+                    className={`proxyContextInput${gpt55ContextCustomInvalid ? " isInvalid" : ""}`}
+                    inputMode="numeric"
+                    aria-label={proxyCopy.gpt55ContextCustomAriaLabel}
+                    value={effectiveGpt55ContextDraft}
+                    disabled={savingSettings}
+                    onChange={(event) => setGpt55ContextDraft(event.target.value)}
+                    onBlur={() => {
+                      void persistCustomGpt55ContextWindow();
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.currentTarget.blur();
+                      }
+                    }}
+                  />
+                ) : (
+                  <span className="proxyContextValue">
+                    {formatTokenCount(gpt55ContextWindow, locale)}
+                  </span>
+                )}
+              </div>
+            </div>
+
+            <div className="proxyInlineSetting proxyContextSetting">
+              <span className="proxyInlineLabel">{proxyCopy.gpt55AutoCompactLabel}</span>
+              <div className="proxyContextControl">
+                <div
+                  className="modeGroup proxyContextModes"
+                  role="radiogroup"
+                  aria-label={proxyCopy.gpt55AutoCompactAriaLabel}
+                >
+                  <button
+                    type="button"
+                    className={activeGpt55AutoCompactPreset === "recommended" ? "primary" : "ghost"}
+                    aria-pressed={activeGpt55AutoCompactPreset === "recommended"}
+                    disabled={savingSettings}
+                    onClick={() => {
+                      void persistGpt55AutoCompactTokenLimit(
+                        Math.min(GPT55_AUTO_COMPACT_RECOMMENDED, gpt55ContextWindow),
+                      );
+                    }}
+                  >
+                    {proxyCopy.gpt55AutoCompactRecommended}
+                  </button>
+                  <button
+                    type="button"
+                    className={activeGpt55AutoCompactPreset === "early" ? "primary" : "ghost"}
+                    aria-pressed={activeGpt55AutoCompactPreset === "early"}
+                    disabled={savingSettings}
+                    onClick={() => {
+                      void persistGpt55AutoCompactTokenLimit(
+                        Math.min(GPT55_AUTO_COMPACT_EARLY, gpt55ContextWindow),
+                      );
+                    }}
+                  >
+                    {proxyCopy.gpt55AutoCompactEarly}
+                  </button>
+                  <button
+                    type="button"
+                    className={activeGpt55AutoCompactPreset === "custom" ? "primary" : "ghost"}
+                    aria-pressed={activeGpt55AutoCompactPreset === "custom"}
+                    disabled={savingSettings}
+                    onClick={() => {
+                      setGpt55AutoCompactDraft(String(gpt55AutoCompactTokenLimit));
+                      setGpt55AutoCompactPresetDraft("custom");
+                    }}
+                  >
+                    {proxyCopy.gpt55AutoCompactCustom}
+                  </button>
+                </div>
+                {activeGpt55AutoCompactPreset === "custom" ? (
+                  <input
+                    className={`proxyContextInput${gpt55AutoCompactCustomInvalid ? " isInvalid" : ""}`}
+                    inputMode="numeric"
+                    aria-label={proxyCopy.gpt55AutoCompactCustomAriaLabel}
+                    value={effectiveGpt55AutoCompactDraft}
+                    disabled={savingSettings}
+                    onChange={(event) => setGpt55AutoCompactDraft(event.target.value)}
+                    onBlur={() => {
+                      void persistCustomGpt55AutoCompactTokenLimit();
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") {
+                        event.currentTarget.blur();
+                      }
+                    }}
+                  />
+                ) : (
+                  <span className="proxyContextValue">
+                    {formatTokenCount(gpt55AutoCompactTokenLimit, locale)}
+                  </span>
+                )}
+              </div>
+            </div>
 
             <div className="proxyInlineSetting">
               <span className="proxyInlineLabel">{proxyCopy.defaultStartLabel}</span>

@@ -12,6 +12,24 @@ fn default_api_proxy_port() -> u16 {
     8787
 }
 
+pub(crate) const DEFAULT_API_PROXY_GPT55_CONTEXT_WINDOW: u64 = 1_050_000;
+pub(crate) const MIN_API_PROXY_GPT55_CONTEXT_WINDOW: u64 = 1_000;
+pub(crate) const MAX_API_PROXY_GPT55_CONTEXT_WINDOW: u64 = 1_050_000;
+pub(crate) const DEFAULT_API_PROXY_GPT55_AUTO_COMPACT_TOKEN_LIMIT: u64 = 650_000;
+pub(crate) const MIN_API_PROXY_GPT55_AUTO_COMPACT_TOKEN_LIMIT: u64 = 1_000;
+
+fn default_api_proxy_gpt55_context_window() -> u64 {
+    DEFAULT_API_PROXY_GPT55_CONTEXT_WINDOW
+}
+
+fn default_api_proxy_gpt55_auto_compact_token_limit() -> u64 {
+    DEFAULT_API_PROXY_GPT55_AUTO_COMPACT_TOKEN_LIMIT
+}
+
+fn default_account_enabled() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct AccountsStore {
     #[serde(default = "default_store_version")]
@@ -54,6 +72,8 @@ impl Default for AccountSourceKind {
 pub(crate) struct StoredAccount {
     pub(crate) id: String,
     pub(crate) label: String,
+    #[serde(default = "default_account_enabled")]
+    pub(crate) enabled: bool,
     #[serde(default)]
     pub(crate) source_kind: AccountSourceKind,
     #[serde(default)]
@@ -99,6 +119,7 @@ pub(crate) struct StoredAccount {
 pub(crate) struct AccountSummary {
     pub(crate) id: String,
     pub(crate) label: String,
+    pub(crate) enabled: bool,
     pub(crate) source_kind: AccountSourceKind,
     pub(crate) email: Option<String>,
     pub(crate) account_key: String,
@@ -231,6 +252,12 @@ pub(crate) struct ApiProxyStatus {
     pub(crate) active_account_id: Option<String>,
     pub(crate) active_account_label: Option<String>,
     pub(crate) last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RuntimeDataInfo {
+    pub(crate) data_dir: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -387,6 +414,10 @@ pub(crate) struct AppSettings {
     pub(crate) auto_start_api_proxy: bool,
     #[serde(default = "default_api_proxy_port")]
     pub(crate) api_proxy_port: u16,
+    #[serde(default = "default_api_proxy_gpt55_context_window")]
+    pub(crate) api_proxy_gpt55_context_window: u64,
+    #[serde(default = "default_api_proxy_gpt55_auto_compact_token_limit")]
+    pub(crate) api_proxy_gpt55_auto_compact_token_limit: u64,
     pub(crate) remote_servers: Vec<RemoteServerConfig>,
     pub(crate) api_proxy_api_key: Option<String>,
     pub(crate) locale: AppLocale,
@@ -408,6 +439,9 @@ impl Default for AppSettings {
             restart_editor_targets: Vec::new(),
             auto_start_api_proxy: false,
             api_proxy_port: default_api_proxy_port(),
+            api_proxy_gpt55_context_window: default_api_proxy_gpt55_context_window(),
+            api_proxy_gpt55_auto_compact_token_limit:
+                default_api_proxy_gpt55_auto_compact_token_limit(),
             remote_servers: Vec::new(),
             api_proxy_api_key: None,
             locale: AppLocale::default(),
@@ -430,9 +464,44 @@ pub(crate) struct AppSettingsPatch {
     pub(crate) restart_editor_targets: Option<Vec<EditorAppId>>,
     pub(crate) auto_start_api_proxy: Option<bool>,
     pub(crate) api_proxy_port: Option<u16>,
+    pub(crate) api_proxy_gpt55_context_window: Option<u64>,
+    pub(crate) api_proxy_gpt55_auto_compact_token_limit: Option<u64>,
     pub(crate) remote_servers: Option<Vec<RemoteServerConfig>>,
     pub(crate) locale: Option<AppLocale>,
     pub(crate) skipped_update_version: Option<Option<String>>,
+}
+
+impl AppSettings {
+    pub(crate) fn normalized_api_proxy_gpt55_context_window(&self) -> u64 {
+        normalize_api_proxy_gpt55_context_window(self.api_proxy_gpt55_context_window)
+    }
+
+    pub(crate) fn normalized_api_proxy_gpt55_auto_compact_token_limit(&self) -> u64 {
+        normalize_api_proxy_gpt55_auto_compact_token_limit(
+            self.api_proxy_gpt55_auto_compact_token_limit,
+            self.normalized_api_proxy_gpt55_context_window(),
+        )
+    }
+}
+
+pub(crate) fn normalize_api_proxy_gpt55_context_window(value: u64) -> u64 {
+    if (MIN_API_PROXY_GPT55_CONTEXT_WINDOW..=MAX_API_PROXY_GPT55_CONTEXT_WINDOW).contains(&value) {
+        value
+    } else {
+        DEFAULT_API_PROXY_GPT55_CONTEXT_WINDOW
+    }
+}
+
+pub(crate) fn normalize_api_proxy_gpt55_auto_compact_token_limit(
+    value: u64,
+    context_window: u64,
+) -> u64 {
+    let max_limit = normalize_api_proxy_gpt55_context_window(context_window);
+    if (MIN_API_PROXY_GPT55_AUTO_COMPACT_TOKEN_LIMIT..=max_limit).contains(&value) {
+        value
+    } else {
+        DEFAULT_API_PROXY_GPT55_AUTO_COMPACT_TOKEN_LIMIT.min(max_limit)
+    }
 }
 
 impl StoredAccount {
@@ -507,6 +576,7 @@ impl StoredAccount {
         AccountSummary {
             id: self.id.clone(),
             label: self.label.clone(),
+            enabled: self.enabled,
             source_kind: self.source_kind.clone(),
             email: self.email.clone(),
             account_key,
@@ -581,6 +651,7 @@ fn merge_duplicate_account_variant(left: StoredAccount, right: StoredAccount) ->
 
     preferred.added_at = preferred.added_at.min(alternate.added_at);
     preferred.updated_at = preferred.updated_at.max(alternate.updated_at);
+    preferred.enabled = preferred.enabled && alternate.enabled;
 
     if preferred.email.is_none() {
         preferred.email = alternate.email.clone();
@@ -658,6 +729,10 @@ fn duplicate_account_merge_score(account: &StoredAccount) -> (u8, u8, u8, u8, i6
 #[cfg(test)]
 mod tests {
     use super::dedupe_account_variants;
+    use super::normalize_api_proxy_gpt55_auto_compact_token_limit;
+    use super::normalize_api_proxy_gpt55_context_window;
+    use super::AppSettings;
+    use super::AppSettingsPatch;
     use super::StoredAccount;
     use super::UsageSnapshot;
     use super::UsageWindow;
@@ -701,6 +776,7 @@ mod tests {
         StoredAccount {
             id: id.to_string(),
             label: label.to_string(),
+            enabled: true,
             source_kind: Default::default(),
             principal_id: Some("shared@example.com".to_string()),
             email: Some("shared@example.com".to_string()),
@@ -725,6 +801,62 @@ mod tests {
             auth_refresh_blocked: false,
             auth_refresh_error: None,
         }
+    }
+
+    #[test]
+    fn app_settings_defaults_gpt_5_5_context_window_to_official_max() {
+        assert_eq!(
+            AppSettings::default().api_proxy_gpt55_context_window,
+            1_050_000
+        );
+        assert_eq!(
+            AppSettings::default().api_proxy_gpt55_auto_compact_token_limit,
+            650_000
+        );
+    }
+
+    #[test]
+    fn normalizes_invalid_gpt_5_5_context_window_to_official_max() {
+        assert_eq!(normalize_api_proxy_gpt55_context_window(999), 1_050_000);
+        assert_eq!(
+            normalize_api_proxy_gpt55_context_window(1_050_001),
+            1_050_000
+        );
+        assert_eq!(normalize_api_proxy_gpt55_context_window(258_400), 258_400);
+    }
+
+    #[test]
+    fn normalizes_invalid_gpt_5_5_auto_compact_to_safe_default() {
+        assert_eq!(
+            normalize_api_proxy_gpt55_auto_compact_token_limit(999, 1_050_000),
+            650_000
+        );
+        assert_eq!(
+            normalize_api_proxy_gpt55_auto_compact_token_limit(900_000, 258_400),
+            258_400
+        );
+        assert_eq!(
+            normalize_api_proxy_gpt55_auto_compact_token_limit(500_000, 1_050_000),
+            500_000
+        );
+    }
+
+    #[test]
+    fn app_settings_patch_accepts_gpt_5_5_limits_without_touching_unrelated_fields() {
+        let patch: AppSettingsPatch = serde_json::from_value(json!({
+            "apiProxyGpt55ContextWindow": 258_400,
+            "apiProxyGpt55AutoCompactTokenLimit": 200_000,
+        }))
+        .unwrap();
+
+        assert_eq!(patch.api_proxy_gpt55_context_window, Some(258_400));
+        assert_eq!(
+            patch.api_proxy_gpt55_auto_compact_token_limit,
+            Some(200_000)
+        );
+        assert_eq!(patch.api_proxy_port, None);
+        assert_eq!(patch.auto_start_api_proxy, None);
+        assert!(patch.remote_servers.is_none());
     }
 
     #[test]
@@ -777,6 +909,7 @@ mod tests {
         let account = StoredAccount {
             id: "mixed".to_string(),
             label: "mixed".to_string(),
+            enabled: true,
             source_kind: Default::default(),
             principal_id: Some("shared@example.com".to_string()),
             email: Some("shared@example.com".to_string()),
@@ -811,6 +944,7 @@ mod tests {
         let account = StoredAccount {
             id: "auth".to_string(),
             label: "auth".to_string(),
+            enabled: true,
             source_kind: Default::default(),
             principal_id: Some("shared@example.com".to_string()),
             email: Some("shared@example.com".to_string()),
@@ -851,6 +985,7 @@ mod tests {
             StoredAccount {
                 id: "first".to_string(),
                 label: "first".to_string(),
+                enabled: true,
                 source_kind: Default::default(),
                 principal_id: Some("first@example.com".to_string()),
                 email: None,
@@ -878,6 +1013,7 @@ mod tests {
             StoredAccount {
                 id: "second".to_string(),
                 label: "second".to_string(),
+                enabled: true,
                 source_kind: Default::default(),
                 principal_id: Some("second@example.com".to_string()),
                 email: None,
@@ -909,5 +1045,26 @@ mod tests {
         assert!(!changed);
         assert_eq!(accounts.len(), 2);
         assert_ne!(accounts[0].account_key(), accounts[1].account_key());
+    }
+
+    #[test]
+    fn deserializes_missing_account_enabled_as_true() {
+        let raw = json!({
+            "id": "legacy",
+            "label": "legacy",
+            "email": "legacy@example.com",
+            "accountId": "account-1",
+            "planType": "plus",
+            "authJson": { "kind": "legacy" },
+            "addedAt": 1,
+            "updatedAt": 2,
+            "usage": null,
+            "usageError": null
+        });
+
+        let account: StoredAccount = serde_json::from_value(raw).unwrap();
+
+        assert!(account.enabled);
+        assert!(account.to_summary(None, None).enabled);
     }
 }

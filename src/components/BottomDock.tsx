@@ -1,6 +1,6 @@
 import { useI18n } from "../i18n/I18nProvider";
 
-type AppTab = "accounts" | "proxy" | "settings";
+type AppTab = "accounts" | "proxy" | "dashboard" | "settings";
 
 type BottomDockProps = {
   activeTab: AppTab;
@@ -39,6 +39,17 @@ function SettingsIcon() {
   );
 }
 
+function DashboardIcon() {
+  return (
+    <svg className="bottomDockIcon" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M5 19V9" />
+      <path d="M12 19V5" />
+      <path d="M19 19v-7" />
+      <path d="M4 19h16" />
+    </svg>
+  );
+}
+
 export function BottomDock({
   activeTab,
   onSelectTab,
@@ -46,6 +57,7 @@ export function BottomDock({
   const { copy } = useI18n();
   const accountActive = activeTab === "accounts";
   const proxyActive = activeTab === "proxy";
+  const dashboardActive = activeTab === "dashboard";
   const settingsActive = activeTab === "settings";
 
   return (
@@ -67,6 +79,15 @@ export function BottomDock({
       >
         <ProxyIcon />
         <span className="bottomDockLabel">{copy.bottomDock.proxy}</span>
+      </button>
+      <button
+        className={`bottomDockButton${dashboardActive ? " isActive" : ""}`}
+        onClick={() => onSelectTab("dashboard")}
+        aria-label={copy.bottomDock.dashboard}
+        title={copy.bottomDock.dashboard}
+      >
+        <DashboardIcon />
+        <span className="bottomDockLabel">{copy.bottomDock.dashboard}</span>
       </button>
       <button
         className={`bottomDockButton${settingsActive ? " isActive" : ""}`}

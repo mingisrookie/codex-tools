@@ -13,11 +13,13 @@ type AccountCardProps = {
   accounts: AccountSummary[];
   exportingAccounts: boolean;
   switchingId: string | null;
+  togglingAccountKey: string | null;
   renamingAccountId: string | null;
   pendingDeleteId: string | null;
   onExport: (account: AccountSummary) => void;
   onReauthorize: (account: AccountSummary) => void;
   onRename: (account: AccountSummary, label: string) => Promise<boolean>;
+  onSetEnabled: (account: AccountSummary, enabled: boolean) => void;
   onSwitch: (account: AccountSummary) => void;
   onDelete: (account: AccountSummary) => void;
 };
@@ -68,6 +70,15 @@ function ReauthorizeIcon() {
       <path d="M21 12a9 9 0 1 1-2.64-6.36" />
       <path d="M21 3v6h-6" />
       <path d="M12 8v4l3 2" />
+    </svg>
+  );
+}
+
+function PowerIcon({ enabled }: { enabled: boolean }) {
+  return (
+    <svg className="iconGlyph" viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+      <path d="M12 2v10" />
+      <path d={enabled ? "M18.36 6.64a9 9 0 1 1-12.72 0" : "M6 18 18 6"} />
     </svg>
   );
 }
@@ -158,11 +169,13 @@ export function AccountCard({
   accounts,
   exportingAccounts,
   switchingId,
+  togglingAccountKey,
   renamingAccountId,
   pendingDeleteId,
   onExport,
   onReauthorize,
   onRename,
+  onSetEnabled,
   onSwitch,
   onDelete,
 }: AccountCardProps) {
@@ -194,6 +207,7 @@ export function AccountCard({
   const normalizedPlan = isRelay ? "api" : selectedAccount.planType || usage?.planType;
   const tone = planTone(normalizedPlan);
   const isSwitching = switchingId === selectedAccount.id;
+  const isToggling = togglingAccountKey === selectedAccount.accountKey;
   const isRenaming = renamingAccountId === selectedAccount.accountKey;
   const isDeletePending = pendingDeleteId === selectedAccount.id;
   const isFreePlan = tone === "free";
@@ -211,8 +225,12 @@ export function AccountCard({
   ].filter((value, index, values): value is string => Boolean(value) && values.indexOf(value) === index);
 
   const handleLaunch = () => {
-    if (isSwitching) return;
+    if (isSwitching || !selectedAccount.enabled) return;
     onSwitch(selectedAccount);
+  };
+  const handleToggleEnabled = () => {
+    if (isToggling) return;
+    onSetEnabled(selectedAccount, !selectedAccount.enabled);
   };
 
   const handleSelectAccount = (account: AccountSummary) => {
@@ -250,7 +268,7 @@ export function AccountCard({
     <article
       className={`accountCard tone-${tone} ${selectedAccount.isCurrent ? "isCurrent" : ""} ${
         isSwitching ? "isSwitching" : ""
-      }`}
+      } ${selectedAccount.enabled ? "" : "isDisabled"}`}
     >
       <header className="cardHeader">
         <div className="cardIdentity">
@@ -268,6 +286,9 @@ export function AccountCard({
                   <span className="planCurrentGlass" aria-hidden="true">
                     {copy.accountCard.currentStamp}
                   </span>
+                ) : null}
+                {!selectedAccount.enabled ? (
+                  <span className="cardBadge stateBadge">{copy.accountCard.disabledBadge}</span>
                 ) : null}
               </>
             ) : (
@@ -296,6 +317,11 @@ export function AccountCard({
                   {account.isCurrent && (
                     <span className="planCurrentGlass" aria-hidden="true">
                       {copy.accountCard.currentStamp}
+                    </span>
+                  )}
+                  {!account.enabled && (
+                    <span className="planCurrentGlass" aria-hidden="true">
+                      {copy.accountCard.disabledStamp}
                     </span>
                   )}
                 </button>
@@ -337,6 +363,24 @@ export function AccountCard({
           )}
         </div>
         <div className="cardActions">
+          <button
+            type="button"
+            className={`cardToggleIcon ${selectedAccount.enabled ? "" : "isOff"}`}
+            onClick={handleToggleEnabled}
+            disabled={isToggling}
+            aria-label={
+              selectedAccount.enabled
+                ? copy.accountCard.disableAccount
+                : copy.accountCard.enableAccount
+            }
+            title={
+              selectedAccount.enabled
+                ? copy.accountCard.disableAccount
+                : copy.accountCard.enableAccount
+            }
+          >
+            <PowerIcon enabled={selectedAccount.enabled} />
+          </button>
           <button
             type="button"
             className="cardExportIcon"
@@ -451,7 +495,7 @@ export function AccountCard({
         <button
           className={`ghost cardLaunchButton ${isSwitching ? "isBusy" : ""}`}
           onClick={handleLaunch}
-          disabled={isSwitching}
+          disabled={isSwitching || !selectedAccount.enabled}
           aria-label={launchLabel}
           title={isSwitching ? `${copy.accountCard.launching}...` : copy.accountCard.launch}
         >

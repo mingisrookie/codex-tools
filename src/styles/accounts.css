@@ -87,6 +87,18 @@
     linear-gradient(180deg, color-mix(in srgb, var(--stamp-current-bg) 12%, transparent), transparent 36%);
 }
 
+.accountCard.isDisabled {
+  opacity: 0.62;
+}
+
+.accountCard.isDisabled::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: linear-gradient(135deg, transparent 48%, rgba(120, 130, 150, 0.12) 48%, rgba(120, 130, 150, 0.12) 52%, transparent 52%);
+}
+
 .accountCard:hover,
 .accountCard:focus-within,
 .accountCard.isSwitching {
@@ -546,6 +558,7 @@
 .cardEditIcon,
 .cardDeleteIcon,
 .cardReauthorizeIcon,
+.cardToggleIcon,
 .cardExportIcon {
   position: static;
   width: 28px;
@@ -559,11 +572,18 @@
 }
 
 .cardExportIcon .iconGlyph,
+.cardToggleIcon .iconGlyph,
 .cardReauthorizeIcon .iconGlyph,
 .cardEditIcon .iconGlyph,
 .cardDeleteIcon .iconGlyph {
   width: 16px;
   height: 16px;
+}
+
+.cardToggleIcon.isOff {
+  border-color: color-mix(in srgb, var(--danger) 24%, var(--line) 76%);
+  background: rgba(242, 106, 119, 0.08);
+  color: var(--error-text);
 }
 
 .cardDeleteIcon.isPending {

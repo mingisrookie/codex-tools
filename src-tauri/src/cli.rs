@@ -18,8 +18,7 @@ use windows::core::HSTRING;
 use windows::Win32::Foundation::RPC_E_CHANGED_MODE;
 #[cfg(target_os = "windows")]
 use windows::Win32::System::Com::{
-    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_LOCAL_SERVER,
-    COINIT_APARTMENTTHREADED,
+    CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_LOCAL_SERVER, COINIT_APARTMENTTHREADED,
 };
 #[cfg(target_os = "windows")]
 use windows::Win32::UI::Shell::{
@@ -124,9 +123,8 @@ pub(crate) fn has_windows_store_codex_app() -> bool {
 
 #[cfg(target_os = "windows")]
 pub(crate) fn launch_windows_store_codex() -> Result<(), String> {
-    let app_id = find_windows_codex_store_app_id().ok_or_else(|| {
-        "未找到微软商店版 Codex 的启动标识（AUMID）。".to_string()
-    })?;
+    let app_id = find_windows_codex_store_app_id()
+        .ok_or_else(|| "未找到微软商店版 Codex 的启动标识（AUMID）。".to_string())?;
     let baseline_pids = list_running_windows_codex_process_ids();
     let process_id = activate_windows_store_codex_by_aumid(&app_id)?;
     if wait_for_windows_store_codex_process(process_id, &baseline_pids) {
@@ -545,10 +543,9 @@ if ($match) {
 #[cfg(target_os = "windows")]
 fn activate_windows_store_codex_by_aumid(app_id: &str) -> Result<u32, String> {
     let _com_guard = WindowsComGuard::initialize()?;
-    let activation_manager: IApplicationActivationManager = unsafe {
-        CoCreateInstance(&ApplicationActivationManager, None, CLSCTX_LOCAL_SERVER)
-    }
-    .map_err(|error| format!("创建微软商店激活管理器失败: {error}"))?;
+    let activation_manager: IApplicationActivationManager =
+        unsafe { CoCreateInstance(&ApplicationActivationManager, None, CLSCTX_LOCAL_SERVER) }
+            .map_err(|error| format!("创建微软商店激活管理器失败: {error}"))?;
 
     let app_id = HSTRING::from(app_id);
     let arguments = HSTRING::new();

@@ -6,6 +6,7 @@ import { AddAccountDialog } from "./components/AddAccountDialog";
 import { AccountsGrid } from "./components/AccountsGrid";
 import { AppTopBar } from "./components/AppTopBar";
 import { BottomDock } from "./components/BottomDock";
+import { DashboardPanel } from "./components/DashboardPanel";
 import { MetaStrip } from "./components/MetaStrip";
 import { NoticeBanner } from "./components/NoticeBanner";
 import { RemoteDeployProgressToast } from "./components/RemoteDeployProgressToast";
@@ -14,7 +15,7 @@ import { UpdateBanner } from "./components/UpdateBanner";
 import { useCodexController } from "./hooks/useCodexController";
 import { useThemeMode } from "./hooks/useThemeMode";
 
-type AppTab = "accounts" | "proxy" | "settings";
+type AppTab = "accounts" | "proxy" | "dashboard" | "settings";
 
 function App() {
     const [activeTab, setActiveTab] = useState<AppTab>("accounts");
@@ -32,6 +33,7 @@ function App() {
         oauthWaitingForCallback,
         exportingAccounts,
         switchingId,
+        togglingAccountKey,
         renamingAccountId,
         pendingDeleteId,
         checkingUpdate,
@@ -47,6 +49,8 @@ function App() {
         hasOpencodeDesktopApp,
         savingSettings,
         apiProxyStatus,
+        apiProxyDashboard,
+        runtimeDataInfo,
         cloudflaredStatus,
         remoteProxyStatuses,
         remoteProxyLogs,
@@ -83,6 +87,7 @@ function App() {
         onImportAuthFiles,
         onExportAccounts,
         loadApiProxyStatus,
+        loadApiProxyDashboard,
         onStartApiProxy,
         onStopApiProxy,
         onRefreshApiProxyKey,
@@ -98,6 +103,7 @@ function App() {
         onStopCloudflared,
         onRenameAccountLabel,
         onDelete,
+        onSetAccountEnabled,
         onSwitch,
         onSmartSwitch,
         onUpdateRemoteServers,
@@ -194,11 +200,15 @@ function App() {
                                 loading={loading}
                                 exportingAccounts={exportingAccounts}
                                 switchingId={switchingId}
+                                togglingAccountKey={togglingAccountKey}
                                 renamingAccountId={renamingAccountId}
                                 pendingDeleteId={pendingDeleteId}
                                 onExport={(account) => void onExportAccounts(account)}
                                 onReauthorize={(account) => void onReauthorizeAccount(account)}
                                 onRename={(account, label) => onRenameAccountLabel(account, label)}
+                                onSetEnabled={(account, enabled) =>
+                                    void onSetAccountEnabled(account, enabled)
+                                }
                                 onSwitch={(account) => void onSwitch(account)}
                                 onDelete={(account) => void onDelete(account)}
                             />
@@ -210,6 +220,8 @@ function App() {
                             accountCount={accounts.length}
                             autoStartEnabled={settings.autoStartApiProxy}
                             savedPort={settings.apiProxyPort}
+                            gpt55ContextWindow={settings.apiProxyGpt55ContextWindow}
+                            gpt55AutoCompactTokenLimit={settings.apiProxyGpt55AutoCompactTokenLimit}
                             remoteServers={settings.remoteServers}
                             remoteStatuses={remoteProxyStatuses}
                             remoteLogs={remoteProxyLogs}
@@ -241,6 +253,16 @@ function App() {
                                     { apiProxyPort: port },
                                     { silent: true, keepInteractive: true },
                                 )}
+                            onPersistGpt55ContextWindow={(contextWindow) =>
+                                updateSettings(
+                                    { apiProxyGpt55ContextWindow: contextWindow },
+                                    { silent: true, keepInteractive: true },
+                                )}
+                            onPersistGpt55AutoCompactTokenLimit={(tokenLimit) =>
+                                updateSettings(
+                                    { apiProxyGpt55AutoCompactTokenLimit: tokenLimit },
+                                    { silent: true, keepInteractive: true },
+                                )}
                             onUpdateRemoteServers={(servers) => void onUpdateRemoteServers(servers)}
                             onRefreshRemoteStatus={(server) => void onRefreshRemoteProxyStatus(server)}
                             onDeployRemote={(server) => void onDeployRemoteProxy(server)}
@@ -252,6 +274,13 @@ function App() {
                             onInstallCloudflared={() => void onInstallCloudflared()}
                             onStartCloudflared={(input) => void onStartCloudflared(input)}
                             onStopCloudflared={() => void onStopCloudflared()}
+                        />
+                    ) : activeTab === "dashboard" ? (
+                        <DashboardPanel
+                            status={apiProxyStatus}
+                            dashboard={apiProxyDashboard}
+                            runtimeDataInfo={runtimeDataInfo}
+                            onRefresh={() => void loadApiProxyDashboard()}
                         />
                     ) : (
                         <SettingsPanel

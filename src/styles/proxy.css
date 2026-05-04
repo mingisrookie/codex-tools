@@ -132,9 +132,339 @@
 
 .proxyControlRow {
   display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr);
+  grid-template-columns: auto minmax(260px, auto) minmax(260px, auto) auto minmax(0, 1fr);
   gap: 10px;
   align-items: end;
+}
+
+.dashboardPage {
+  width: min(1040px, 100%);
+  margin: 0 auto;
+  padding: 10px 0 32px;
+}
+
+.dashboardShell {
+  display: grid;
+  gap: 18px;
+}
+
+.dashboardHero,
+.dashboardSectionCard,
+.dashboardMiniCard {
+  border: 1px solid var(--section-line);
+  border-radius: 24px;
+  background: var(--section-card-surface);
+  box-shadow: var(--section-shadow);
+  backdrop-filter: blur(14px) saturate(112%);
+}
+
+.dashboardHero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  padding: 18px 20px;
+  background: var(--section-card-primary-surface);
+}
+
+.dashboardHero h2,
+.dashboardSectionHeader h3,
+.dashboardMiniCard h4 {
+  margin: 0;
+}
+
+.dashboardHero p,
+.dashboardSectionHeader p,
+.dashboardMuted {
+  margin: 4px 0 0;
+  color: var(--subtle);
+  font: 500 0.82rem/1.45 var(--font-ui);
+}
+
+.dashboardHeroActions {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--ink);
+  font: 650 0.82rem/1 var(--font-ui);
+}
+
+.dashboardSectionCard,
+.dashboardMiniCard {
+  display: grid;
+  gap: 14px;
+  padding: 16px 18px 18px;
+}
+
+.dashboardSectionHeader {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 12px;
+  color: var(--subtle);
+  font: 600 0.76rem/1.2 var(--font-ui);
+}
+
+.dashboardStatsGrid,
+.dashboardWindowGrid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.dashboardStatCard {
+  display: grid;
+  gap: 6px;
+  min-height: 74px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--line) 88%, var(--surface-tint) 12%);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--meta-bg) 58%, transparent);
+  box-shadow: inset 0 1px var(--surface-highlight-soft);
+}
+
+.dashboardStatCard span,
+.dashboardPathGrid span {
+  color: var(--subtle);
+  font: 600 0.74rem/1.1 var(--font-ui);
+}
+
+.dashboardStatCard strong {
+  color: var(--ink);
+  font: 720 1.35rem/1 var(--font-ui);
+  letter-spacing: -0.04em;
+}
+
+.dashboardStatCard.isDanger strong {
+  color: var(--error-text);
+}
+
+.dashboardPathGrid {
+  display: grid;
+  gap: 10px;
+}
+
+.dashboardPathGrid div {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.dashboardPathGrid strong {
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font: 600 0.78rem/1.35 var(--font-mono);
+}
+
+.dashboardColumns {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.dashboardRankList {
+  display: grid;
+  gap: 8px;
+}
+
+.dashboardRankRow {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--meta-bg) 52%, transparent);
+  color: var(--subtle);
+  font: 600 0.76rem/1.2 var(--font-ui);
+}
+
+.dashboardRankRow span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink);
+}
+
+.dashboardRankRow small {
+  font: 600 0.72rem/1 var(--font-mono);
+}
+
+.dashboardTableWrap {
+  overflow-x: auto;
+}
+
+.dashboardTable {
+  width: 100%;
+  border-collapse: collapse;
+  font: 600 0.75rem/1.35 var(--font-ui);
+}
+
+.dashboardTable th,
+.dashboardTable td {
+  padding: 9px 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 76%, transparent);
+  text-align: left;
+  white-space: nowrap;
+}
+
+.dashboardTable th {
+  color: var(--subtle);
+  font-size: 0.7rem;
+}
+
+.dashboardChartCard {
+  overflow: hidden;
+}
+
+.dashboardSegmented {
+  display: inline-flex;
+  gap: 6px;
+  padding: 4px;
+  border: 1px solid color-mix(in srgb, var(--line) 84%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--meta-bg) 52%, transparent);
+}
+
+.dashboardSegmented button {
+  min-height: 30px;
+  border: 0;
+  border-radius: 999px;
+  padding: 0 12px;
+  background: transparent;
+  color: var(--subtle);
+  font: 700 0.74rem/1 var(--font-ui);
+  cursor: pointer;
+}
+
+.dashboardSegmented button.isActive {
+  background: var(--button-primary-bg);
+  color: var(--button-primary-text);
+  box-shadow: var(--button-primary-shadow);
+}
+
+.dashboardChart {
+  position: relative;
+  height: 220px;
+  padding: 18px 8px 10px 54px;
+  border: 1px solid color-mix(in srgb, var(--line) 82%, transparent);
+  border-radius: 20px;
+  background:
+    linear-gradient(
+      to bottom,
+      color-mix(in srgb, var(--line) 34%, transparent) 1px,
+      transparent 1px
+    )
+    0 0 / 100% 25%,
+    color-mix(in srgb, var(--meta-bg) 45%, transparent);
+}
+
+.dashboardBars {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: repeat(24, minmax(0, 1fr));
+  align-items: end;
+  gap: 5px;
+  height: 100%;
+}
+
+.dashboardYAxis {
+  position: absolute;
+  inset: 18px auto 10px 10px;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  width: 40px;
+  color: var(--subtle);
+  font: 700 0.68rem/1 var(--font-mono);
+  text-align: right;
+}
+
+.dashboardBarSlot {
+  display: flex;
+  align-items: end;
+  height: 100%;
+  min-width: 0;
+}
+
+.dashboardBar {
+  position: relative;
+  width: 100%;
+  min-height: 4px;
+  overflow: hidden;
+  border-radius: 999px 999px 4px 4px;
+  background: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--stamp-current-color) 95%, white 5%),
+    color-mix(in srgb, var(--stamp-current-color) 48%, transparent)
+  );
+  box-shadow: 0 10px 28px rgba(47, 210, 200, 0.18);
+}
+
+.dashboardBarFailure {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--error-text) 82%, transparent);
+}
+
+.dashboardLine {
+  position: absolute;
+  inset: 14px 8px 10px 54px;
+  z-index: 2;
+  width: calc(100% - 62px);
+  height: calc(100% - 24px);
+  pointer-events: none;
+  filter: drop-shadow(0 6px 10px rgba(255, 143, 56, 0.2));
+}
+
+.dashboardLine polyline {
+  fill: none;
+  stroke: color-mix(in srgb, var(--button-primary-border) 85%, var(--ink) 15%);
+  stroke-width: 2.6;
+  vector-effect: non-scaling-stroke;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.dashboardChartLegend {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px;
+  color: var(--subtle);
+  font: 700 0.72rem/1 var(--font-ui);
+}
+
+.dashboardChartLegend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.dashboardChartLegend i {
+  width: 18px;
+  height: 8px;
+  border-radius: 999px;
+  display: inline-block;
+}
+
+.legendBar {
+  background: var(--stamp-current-color);
+}
+
+.legendFail {
+  background: var(--error-text);
+}
+
+.legendLine {
+  height: 3px !important;
+  background: color-mix(in srgb, var(--button-primary-border) 85%, var(--ink) 15%);
 }
 
 .proxyCompactField {
@@ -156,6 +486,50 @@
   gap: 10px;
   min-height: 40px;
   flex-wrap: wrap;
+}
+
+.proxyContextSetting {
+  align-items: end;
+}
+
+.proxyContextControl {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-height: 38px;
+}
+
+.proxyContextModes > button {
+  min-height: 34px;
+  padding-inline: 10px;
+  white-space: nowrap;
+}
+
+.proxyContextInput {
+  width: 116px;
+  height: 34px;
+  border: 1px solid color-mix(in srgb, var(--line) 86%, var(--surface-tint) 14%);
+  border-radius: 10px;
+  padding: 0 10px;
+  background: color-mix(in srgb, var(--meta-bg) 46%, transparent);
+  color: var(--ink);
+  font: 600 0.76rem/1 "IBM Plex Mono", monospace;
+  outline: none;
+}
+
+.proxyContextInput:focus {
+  border-color: var(--button-primary-border);
+  box-shadow: 0 0 0 4px rgba(255, 143, 56, 0.12);
+}
+
+.proxyContextInput.isInvalid {
+  border-color: color-mix(in srgb, var(--danger) 68%, var(--line) 32%);
+}
+
+.proxyContextValue {
+  color: var(--ink);
+  font: 700 0.78rem/1 "IBM Plex Mono", monospace;
 }
 
 .proxyControlActions {

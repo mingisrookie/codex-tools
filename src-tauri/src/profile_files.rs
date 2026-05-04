@@ -84,8 +84,12 @@ pub(crate) fn sync_account_profile_in_store_path(
     let profile_dir = auth_path
         .parent()
         .ok_or_else(|| format!("无法解析账号 profile 目录 {}", auth_path.display()))?;
-    fs::create_dir_all(profile_dir)
-        .map_err(|error| format!("创建账号 profile 目录失败 {}: {error}", profile_dir.display()))?;
+    fs::create_dir_all(profile_dir).map_err(|error| {
+        format!(
+            "创建账号 profile 目录失败 {}: {error}",
+            profile_dir.display()
+        )
+    })?;
 
     let config_template =
         read_optional_text(&config_path)?.or(read_current_codex_config_optional()?);
@@ -146,14 +150,26 @@ pub(crate) fn apply_account_profile(account: &StoredAccount) -> Result<(), Strin
             .unwrap_or_else(|| PROFILE_INCOMPLETE_MESSAGE.to_string()));
     }
 
-    let auth_contents = fs::read_to_string(&auth_path)
-        .map_err(|error| format!("读取账号 profile auth.json 失败 {}: {error}", auth_path.display()))?;
-    let auth_json: Value = serde_json::from_str(&auth_contents)
-        .map_err(|error| format!("账号 profile auth.json 不是合法 JSON {}: {error}", auth_path.display()))?;
+    let auth_contents = fs::read_to_string(&auth_path).map_err(|error| {
+        format!(
+            "读取账号 profile auth.json 失败 {}: {error}",
+            auth_path.display()
+        )
+    })?;
+    let auth_json: Value = serde_json::from_str(&auth_contents).map_err(|error| {
+        format!(
+            "账号 profile auth.json 不是合法 JSON {}: {error}",
+            auth_path.display()
+        )
+    })?;
     auth::write_active_codex_auth(&auth_json)?;
 
-    let config_contents = fs::read_to_string(&config_path)
-        .map_err(|error| format!("读取账号 profile config.toml 失败 {}: {error}", config_path.display()))?;
+    let config_contents = fs::read_to_string(&config_path).map_err(|error| {
+        format!(
+            "读取账号 profile config.toml 失败 {}: {error}",
+            config_path.display()
+        )
+    })?;
     let active_config_path = current_codex_config_path()?;
     let parent = active_config_path
         .parent()
@@ -247,7 +263,9 @@ pub(crate) async fn validate_relay_target(
         let body = response.text().await.unwrap_or_default();
         return Err(match status {
             StatusCode::UNAUTHORIZED => "API Key 无效或已失效。".to_string(),
-            StatusCode::NOT_FOUND => "Base URL 不支持 /responses 接口，请确认填写到 /v1 为止。".to_string(),
+            StatusCode::NOT_FOUND => {
+                "Base URL 不支持 /responses 接口，请确认填写到 /v1 为止。".to_string()
+            }
             StatusCode::BAD_REQUEST => {
                 if body.to_ascii_lowercase().contains("model") {
                     format!("模型名称不可用: {}", truncate_message(&body))

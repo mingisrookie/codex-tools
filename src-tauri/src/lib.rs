@@ -3,6 +3,7 @@ mod app_paths;
 mod auth;
 mod cli;
 mod cloudflared_service;
+mod dashboard_metrics;
 mod editor_apps;
 mod i18n;
 mod models;
@@ -52,6 +53,7 @@ use models::OauthCallbackFinishedEvent;
 use models::PreparedOauthLogin;
 use models::RemoteProxyStatus;
 use models::RemoteServerConfig;
+use models::RuntimeDataInfo;
 use models::StartCloudflaredTunnelInput;
 use models::SwitchAccountResult;
 use state::AppState;
@@ -618,6 +620,20 @@ async fn update_account_label(
 }
 
 #[tauri::command]
+async fn set_account_enabled(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    account_key: String,
+    enabled: bool,
+) -> Result<Vec<AccountSummary>, String> {
+    let summaries =
+        account_service::set_account_enabled_internal(&app, state.inner(), &account_key, enabled)
+            .await?;
+    let _ = tray::refresh_macos_tray_snapshot(&app);
+    Ok(summaries)
+}
+
+#[tauri::command]
 async fn refresh_all_usage(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -638,6 +654,22 @@ async fn get_codex_token_usage() -> Result<token_usage::CodexTokenUsageSnapshot,
     tauri::async_runtime::spawn_blocking(token_usage::collect_codex_token_usage_snapshot)
         .await
         .map_err(|error| format!("统计 Codex token 用量失败: {error}"))?
+}
+
+#[tauri::command]
+async fn get_runtime_data_info(app: AppHandle) -> Result<RuntimeDataInfo, String> {
+    let data_dir = app_paths::app_data_dir(&app)?;
+    Ok(RuntimeDataInfo {
+        data_dir: data_dir.to_string_lossy().to_string(),
+    })
+}
+
+#[tauri::command]
+async fn get_api_proxy_dashboard(
+    app: AppHandle,
+) -> Result<dashboard_metrics::DashboardSnapshot, String> {
+    let data_dir = app_paths::app_data_dir(&app)?;
+    Ok(dashboard_metrics::load_dashboard_snapshot(&data_dir))
 }
 
 #[tauri::command]
@@ -879,9 +911,9 @@ async fn switch_account_and_launch(
     let mut account = store
         .accounts
         .iter()
-        .find(|account| account.id == id)
+        .find(|account| account.id == id && account.enabled)
         .cloned()
-        .ok_or_else(|| "找不到要切换的账号".to_string())?;
+        .ok_or_else(|| "找不到要切换的账号，或该账号已停用".to_string())?;
 
     if matches!(account.source_kind, models::AccountSourceKind::Chatgpt)
         && auth::auth_tokens_need_refresh(&account.auth_json)
@@ -1456,8 +1488,11 @@ pub fn run() {
             export_accounts_zip,
             delete_account,
             update_account_label,
+            set_account_enabled,
             refresh_all_usage,
             get_codex_token_usage,
+            get_runtime_data_info,
+            get_api_proxy_dashboard,
             get_app_settings,
             update_app_settings,
             detect_codex_app,

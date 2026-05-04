@@ -43,11 +43,13 @@ type AccountsGridProps = {
   loading: boolean;
   exportingAccounts: boolean;
   switchingId: string | null;
+  togglingAccountKey: string | null;
   renamingAccountId: string | null;
   pendingDeleteId: string | null;
   onExport: (account: AccountSummary) => void;
   onReauthorize: (account: AccountSummary) => void;
   onRename: (account: AccountSummary, label: string) => Promise<boolean>;
+  onSetEnabled: (account: AccountSummary, enabled: boolean) => void;
   onSwitch: (account: AccountSummary) => void;
   onDelete: (account: AccountSummary) => void;
 };
@@ -57,11 +59,13 @@ export function AccountsGrid({
   loading,
   exportingAccounts,
   switchingId,
+  togglingAccountKey,
   renamingAccountId,
   pendingDeleteId,
   onExport,
   onReauthorize,
   onRename,
+  onSetEnabled,
   onSwitch,
   onDelete,
 }: AccountsGridProps) {
@@ -99,11 +103,13 @@ export function AccountsGrid({
           accounts={group.variants}
           exportingAccounts={exportingAccounts}
           switchingId={switchingId}
+          togglingAccountKey={togglingAccountKey}
           renamingAccountId={renamingAccountId}
           pendingDeleteId={pendingDeleteId}
           onExport={onExport}
           onReauthorize={onReauthorize}
           onRename={onRename}
+          onSetEnabled={onSetEnabled}
           onSwitch={onSwitch}
           onDelete={onDelete}
         />

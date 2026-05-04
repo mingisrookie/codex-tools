@@ -11,6 +11,7 @@ import type { MessageCatalog } from "../i18n/catalog";
 import type {
   AccountSummary,
   ApiProxyStatus,
+  ApiProxyDashboardSnapshot,
   AppSettings,
   AuthJsonImportInput,
   CloudflaredStatus,
@@ -25,6 +26,7 @@ import type {
   RemoteDeployProgress,
   RemoteProxyStatus,
   RemoteServerConfig,
+  RuntimeDataInfo,
   StartCloudflaredTunnelInput,
   SwitchAccountResult,
   UpdateSettingsOptions,
@@ -36,6 +38,7 @@ const TOKEN_USAGE_REFRESH_MS = 60_000;
 const EDITOR_SCAN_MS = 60_000;
 const UPDATE_CHECK_MS = 60 * 60 * 1000;
 const API_PROXY_POLL_MS = 4_000;
+const DASHBOARD_POLL_MS = 5_000;
 const CLOUDFLARED_POLL_MS = 3_000;
 const DEFAULT_SETTINGS: AppSettings = {
   launchAtStartup: false,
@@ -49,6 +52,8 @@ const DEFAULT_SETTINGS: AppSettings = {
   restartEditorTargets: [],
   autoStartApiProxy: false,
   apiProxyPort: 8787,
+  apiProxyGpt55ContextWindow: 1_050_000,
+  apiProxyGpt55AutoCompactTokenLimit: 650_000,
   remoteServers: [],
   locale: DEFAULT_LOCALE,
   skippedUpdateVersion: null,
@@ -63,6 +68,10 @@ const DEFAULT_API_PROXY_STATUS: ApiProxyStatus = {
   activeAccountId: null,
   activeAccountLabel: null,
   lastError: null,
+};
+
+const DEFAULT_RUNTIME_DATA_INFO: RuntimeDataInfo = {
+  dataDir: "",
 };
 const DEFAULT_CLOUDFLARED_STATUS: CloudflaredStatus = {
   installed: false,
@@ -155,6 +164,11 @@ export function useCodexController() {
   const [oauthWaitingForCallback, setOauthWaitingForCallback] = useState(false);
   const [exportingAccounts, setExportingAccounts] = useState(false);
   const [apiProxyStatus, setApiProxyStatus] = useState<ApiProxyStatus>(DEFAULT_API_PROXY_STATUS);
+  const [apiProxyDashboard, setApiProxyDashboard] =
+    useState<ApiProxyDashboardSnapshot | null>(null);
+  const [runtimeDataInfo, setRuntimeDataInfo] = useState<RuntimeDataInfo>(
+    DEFAULT_RUNTIME_DATA_INFO,
+  );
   const [cloudflaredStatus, setCloudflaredStatus] = useState<CloudflaredStatus>(DEFAULT_CLOUDFLARED_STATUS);
   const [remoteProxyStatusesRaw, setRemoteProxyStatusesRaw] = useState<Record<string, RemoteProxyStatus>>({});
   const [remoteProxyLogs, setRemoteProxyLogs] = useState<Record<string, string>>({});
@@ -174,6 +188,7 @@ export function useCodexController() {
   const [stoppingCloudflared, setStoppingCloudflared] = useState(false);
   const [switchingId, setSwitchingId] = useState<string | null>(null);
   const [renamingAccountId, setRenamingAccountId] = useState<string | null>(null);
+  const [togglingAccountKey, setTogglingAccountKey] = useState<string | null>(null);
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
   const [checkingUpdate, setCheckingUpdate] = useState(false);
   const [installingUpdate, setInstallingUpdate] = useState(false);
@@ -357,6 +372,22 @@ export function useCodexController() {
       setApiProxyStatus(DEFAULT_API_PROXY_STATUS);
     }
   }, [localizeApiProxyStatus]);
+
+  const loadRuntimeDataInfo = useCallback(async () => {
+    try {
+      setRuntimeDataInfo(await invoke<RuntimeDataInfo>("get_runtime_data_info"));
+    } catch {
+      setRuntimeDataInfo(DEFAULT_RUNTIME_DATA_INFO);
+    }
+  }, []);
+
+  const loadApiProxyDashboard = useCallback(async () => {
+    try {
+      setApiProxyDashboard(await invoke<ApiProxyDashboardSnapshot>("get_api_proxy_dashboard"));
+    } catch {
+      setApiProxyDashboard(null);
+    }
+  }, []);
 
   const loadCloudflaredStatus = useCallback(async () => {
     try {
@@ -652,7 +683,9 @@ export function useCodexController() {
         await loadSettings();
         const initialAccounts = await loadAccounts();
         maybeShowProfileIntegrityNotice(initialAccounts);
+        await loadRuntimeDataInfo();
         await loadApiProxyStatus();
+        await loadApiProxyDashboard();
         await loadCloudflaredStatus();
         await refreshUsage(true);
         await refreshTokenUsage(true);
@@ -693,10 +726,12 @@ export function useCodexController() {
   }, [
     checkForAppUpdate,
     loadAccounts,
+    loadApiProxyDashboard,
     loadApiProxyStatus,
     loadCloudflaredStatus,
     loadInstalledEditorApps,
     loadOpencodeDesktopAppInstalled,
+    loadRuntimeDataInfo,
     loadSettings,
     maybeShowProfileIntegrityNotice,
     refreshTokenUsage,
@@ -709,9 +744,19 @@ export function useCodexController() {
     }
 
     void loadAccounts();
+    void loadRuntimeDataInfo();
     void loadApiProxyStatus();
+    void loadApiProxyDashboard();
     void loadCloudflaredStatus();
-  }, [loadAccounts, loadApiProxyStatus, loadCloudflaredStatus, loading, locale]);
+  }, [
+    loadAccounts,
+    loadApiProxyDashboard,
+    loadApiProxyStatus,
+    loadCloudflaredStatus,
+    loadRuntimeDataInfo,
+    loading,
+    locale,
+  ]);
 
   useEffect(() => {
     setRemoteProxyStatusesRaw((current) => {
@@ -790,6 +835,16 @@ export function useCodexController() {
       clearInterval(timer);
     };
   }, [apiProxyStatus.running, loadApiProxyStatus]);
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      void loadApiProxyDashboard();
+    }, DASHBOARD_POLL_MS);
+
+    return () => {
+      clearInterval(timer);
+    };
+  }, [loadApiProxyDashboard]);
 
   useEffect(() => {
     if (!cloudflaredStatus.running) {
@@ -1531,8 +1586,46 @@ export function useCodexController() {
     }
   }, [copy.notices, localizeError, pendingDeleteId]);
 
+  const onSetAccountEnabled = useCallback(
+    async (account: AccountSummary, enabled: boolean) => {
+      if (togglingAccountKey === account.accountKey) {
+        return;
+      }
+
+      setTogglingAccountKey(account.accountKey);
+      try {
+        const data = await invoke<AccountSummary[]>("set_account_enabled", {
+          accountKey: account.accountKey,
+          enabled,
+        });
+        applyAccounts(data);
+        setNotice({
+          type: "ok",
+          message: enabled
+            ? copy.notices.accountEnabled(account.label)
+            : copy.notices.accountDisabled(account.label),
+        });
+      } catch (error) {
+        setNotice({
+          type: "error",
+          message: copy.notices.accountToggleFailed(localizeError(String(error))),
+        });
+      } finally {
+        setTogglingAccountKey((current) =>
+          current === account.accountKey ? null : current,
+        );
+      }
+    },
+    [applyAccounts, copy.notices, localizeError, togglingAccountKey],
+  );
+
   const onSwitch = useCallback(
     async (account: AccountSummary) => {
+      if (!account.enabled) {
+        setNotice({ type: "info", message: copy.notices.accountDisabled(account.label) });
+        return;
+      }
+
       setSwitchingId(account.id);
       try {
         const result = await invoke<SwitchAccountResult>("switch_account_and_launch", {
@@ -1685,6 +1778,8 @@ export function useCodexController() {
     oauthWaitingForCallback,
     exportingAccounts,
     apiProxyStatus,
+    apiProxyDashboard,
+    runtimeDataInfo,
     cloudflaredStatus,
     remoteProxyStatuses,
     remoteProxyLogs,
@@ -1703,6 +1798,7 @@ export function useCodexController() {
     startingCloudflared,
     stoppingCloudflared,
     switchingId,
+    togglingAccountKey,
     renamingAccountId,
     pendingDeleteId,
     checkingUpdate,
@@ -1736,6 +1832,7 @@ export function useCodexController() {
     onImportAuthFiles,
     onExportAccounts,
     loadApiProxyStatus,
+    loadApiProxyDashboard,
     onStartApiProxy,
     onStopApiProxy,
     onRefreshApiProxyKey,
@@ -1751,6 +1848,7 @@ export function useCodexController() {
     onStopCloudflared,
     onRenameAccountLabel,
     onDelete,
+    onSetAccountEnabled,
     onSwitch,
     onSmartSwitch,
     onUpdateRemoteServers,
