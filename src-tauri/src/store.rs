@@ -226,7 +226,9 @@ pub(crate) fn update_account_group_refresh_state_in_path(
         && auth_json.is_some()
         && current_auth_account_key().as_deref() == Some(account_key)
     {
-        write_active_codex_auth(auth_json.expect("checked is_some above"))?;
+        if let Some(auth_json) = auth_json {
+            write_active_codex_auth(auth_json)?;
+        }
     }
 
     Ok(true)

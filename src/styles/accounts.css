@@ -357,8 +357,8 @@
 }
 
 .cardAliasEditor input:focus {
-  border-color: var(--button-primary-border);
-  box-shadow: 0 0 0 4px rgba(255, 143, 56, 0.12);
+  border-color: color-mix(in srgb, var(--brand-cool) 54%, var(--line) 46%);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand-cool) 14%, transparent);
 }
 
 .usageGrid {
@@ -586,8 +586,31 @@
   color: var(--error-text);
 }
 
+.cardEditIcon:hover:not(:disabled),
+.cardEditIcon:focus-visible,
+.cardReauthorizeIcon:hover:not(:disabled),
+.cardReauthorizeIcon:focus-visible,
+.cardExportIcon:hover:not(:disabled),
+.cardExportIcon:focus-visible,
+.cardDeleteIcon:hover:not(:disabled),
+.cardDeleteIcon:focus-visible {
+  border-color: color-mix(in srgb, var(--tone-a) 30%, var(--line) 70%);
+  background: color-mix(in srgb, var(--surface-hover-bg) 78%, var(--tone-a) 22%);
+  color: color-mix(in srgb, var(--ink) 86%, var(--tone-a) 14%);
+  box-shadow:
+    0 6px 14px rgba(28, 43, 68, 0.08),
+    inset 0 1px var(--surface-highlight-soft);
+}
+
 .cardDeleteIcon.isPending {
   border-color: color-mix(in srgb, var(--danger) 34%, var(--line) 66%);
   background: rgba(242, 106, 119, 0.08);
+  color: var(--error-text);
+}
+
+.cardDeleteIcon.isPending:hover:not(:disabled),
+.cardDeleteIcon.isPending:focus-visible {
+  border-color: color-mix(in srgb, var(--danger) 42%, var(--line) 58%);
+  background: color-mix(in srgb, var(--danger) 12%, transparent);
   color: var(--error-text);
 }

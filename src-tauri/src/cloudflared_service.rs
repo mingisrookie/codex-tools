@@ -574,8 +574,7 @@ fn read_last_log_line(path: &Path) -> Option<String> {
     let raw = fs::read_to_string(path).ok()?;
     raw.lines()
         .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .last()
+        .rfind(|line| !line.is_empty())
         .map(ToString::to_string)
 }
 

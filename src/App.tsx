@@ -51,6 +51,11 @@ function App() {
         apiProxyStatus,
         apiProxyDashboard,
         runtimeDataInfo,
+        apiProxyUsageStats,
+        apiProxyUsageRange,
+        apiProxyUsageMetric,
+        apiProxyUsageLoading,
+        apiProxyUsageClearing,
         cloudflaredStatus,
         remoteProxyStatuses,
         remoteProxyLogs,
@@ -88,6 +93,9 @@ function App() {
         onExportAccounts,
         loadApiProxyStatus,
         loadApiProxyDashboard,
+        onSelectApiProxyUsageRange,
+        onSelectApiProxyUsageMetric,
+        onClearApiProxyUsageStats,
         onStartApiProxy,
         onStopApiProxy,
         onRefreshApiProxyKey,
@@ -216,12 +224,19 @@ function App() {
                     ) : activeTab === "proxy" ? (
                         <ApiProxyPanel
                             status={apiProxyStatus}
+                            apiProxyUsageStats={apiProxyUsageStats}
+                            apiProxyUsageRange={apiProxyUsageRange}
+                            apiProxyUsageMetric={apiProxyUsageMetric}
+                            apiProxyUsageLoading={apiProxyUsageLoading}
+                            apiProxyUsageClearing={apiProxyUsageClearing}
                             cloudflaredStatus={cloudflaredStatus}
                             accountCount={accounts.length}
                             autoStartEnabled={settings.autoStartApiProxy}
                             savedPort={settings.apiProxyPort}
                             gpt55ContextWindow={settings.apiProxyGpt55ContextWindow}
                             gpt55AutoCompactTokenLimit={settings.apiProxyGpt55AutoCompactTokenLimit}
+                            loadBalanceMode={settings.apiProxyLoadBalanceMode}
+                            sequentialFiveHourLimitPercent={settings.apiProxySequentialFiveHourLimitPercent}
                             remoteServers={settings.remoteServers}
                             remoteStatuses={remoteProxyStatuses}
                             remoteLogs={remoteProxyLogs}
@@ -241,6 +256,9 @@ function App() {
                             stoppingCloudflared={stoppingCloudflared}
                             onStart={onStartApiProxy}
                             onStop={() => void onStopApiProxy()}
+                            onSelectApiProxyUsageRange={onSelectApiProxyUsageRange}
+                            onSelectApiProxyUsageMetric={onSelectApiProxyUsageMetric}
+                            onClearApiProxyUsageStats={onClearApiProxyUsageStats}
                             onRefreshApiKey={() => void onRefreshApiProxyKey()}
                             onRefresh={() => void loadApiProxyStatus()}
                             onToggleAutoStart={(enabled) =>
@@ -261,6 +279,16 @@ function App() {
                             onPersistGpt55AutoCompactTokenLimit={(tokenLimit) =>
                                 updateSettings(
                                     { apiProxyGpt55AutoCompactTokenLimit: tokenLimit },
+                                    { silent: true, keepInteractive: true },
+                                )}
+                            onUpdateLoadBalanceMode={(mode) =>
+                                updateSettings(
+                                    { apiProxyLoadBalanceMode: mode },
+                                    { silent: true, keepInteractive: true },
+                                )}
+                            onUpdateSequentialFiveHourLimitPercent={(percent) =>
+                                updateSettings(
+                                    { apiProxySequentialFiveHourLimitPercent: percent },
                                     { silent: true, keepInteractive: true },
                                 )}
                             onUpdateRemoteServers={(servers) => void onUpdateRemoteServers(servers)}

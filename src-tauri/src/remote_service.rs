@@ -893,50 +893,59 @@ fn install_sshpass_sync() -> Result<(), String> {
         return Ok(());
     }
 
-    #[cfg(target_os = "macos")]
-    {
-        ensure_command_available(
-            "brew",
-            "未检测到 Homebrew，请先安装 brew 后再自动安装 sshpass。",
-        )?;
-        run_install_command(
-            "brew",
-            &["install", "sshpass"],
-            "通过 Homebrew 安装 sshpass 失败",
-        )?;
-    }
-
     #[cfg(target_os = "windows")]
     {
-        return Err("当前平台暂未内置一键安装 sshpass，请先手动安装。".to_string());
+        Err("当前平台暂未内置一键安装 sshpass，请先手动安装。".to_string())
     }
 
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(not(target_os = "windows"))]
     {
-        if command_exists("apt-get") {
-            run_shell_install_command(
-                "sudo apt-get update && sudo apt-get install -y sshpass",
-                "通过 apt-get 安装 sshpass 失败",
+        #[cfg(target_os = "macos")]
+        {
+            ensure_command_available(
+                "brew",
+                "未检测到 Homebrew，请先安装 brew 后再自动安装 sshpass。",
             )?;
-        } else if command_exists("dnf") {
-            run_shell_install_command("sudo dnf install -y sshpass", "通过 dnf 安装 sshpass 失败")?;
-        } else if command_exists("yum") {
-            run_shell_install_command("sudo yum install -y sshpass", "通过 yum 安装 sshpass 失败")?;
-        } else if command_exists("pacman") {
-            run_shell_install_command(
-                "sudo pacman -Sy --noconfirm sshpass",
-                "通过 pacman 安装 sshpass 失败",
+            run_install_command(
+                "brew",
+                &["install", "sshpass"],
+                "通过 Homebrew 安装 sshpass 失败",
             )?;
-        } else {
-            return Err("当前平台暂未内置一键安装 sshpass，请先手动安装。".to_string());
         }
-    }
 
-    if !command_sshpass_available() {
-        return Err("自动安装 sshpass 后仍未检测到可执行文件。".to_string());
-    }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            if command_exists("apt-get") {
+                run_shell_install_command(
+                    "sudo apt-get update && sudo apt-get install -y sshpass",
+                    "通过 apt-get 安装 sshpass 失败",
+                )?;
+            } else if command_exists("dnf") {
+                run_shell_install_command(
+                    "sudo dnf install -y sshpass",
+                    "通过 dnf 安装 sshpass 失败",
+                )?;
+            } else if command_exists("yum") {
+                run_shell_install_command(
+                    "sudo yum install -y sshpass",
+                    "通过 yum 安装 sshpass 失败",
+                )?;
+            } else if command_exists("pacman") {
+                run_shell_install_command(
+                    "sudo pacman -Sy --noconfirm sshpass",
+                    "通过 pacman 安装 sshpass 失败",
+                )?;
+            } else {
+                return Err("当前平台暂未内置一键安装 sshpass，请先手动安装。".to_string());
+            }
+        }
 
-    Ok(())
+        if !command_sshpass_available() {
+            return Err("自动安装 sshpass 后仍未检测到可执行文件。".to_string());
+        }
+
+        Ok(())
+    }
 }
 
 fn install_rust_toolchain_sync(app: &AppHandle, server: &RemoteServerConfig) -> Result<(), String> {
@@ -962,91 +971,94 @@ fn install_rust_toolchain_sync(app: &AppHandle, server: &RemoteServerConfig) -> 
         }
     }
 
-    #[cfg(target_os = "macos")]
-    {
-        emit_remote_deploy_progress(
-            app,
-            server,
-            "preparingBuilder",
-            10,
-            Some("brew install rust".to_string()),
-        );
-        ensure_command_available(
-            "brew",
-            "未检测到 Homebrew，请先安装 brew 后再自动安装 Rust 工具链。",
-        )?;
-        run_install_command(
-            "brew",
-            &["install", "rust"],
-            "通过 Homebrew 安装 Rust 工具链失败",
-        )?;
-    }
-
     #[cfg(target_os = "windows")]
     {
-        return Err("当前平台暂未内置一键安装 Rust 工具链，请先手动安装。".to_string());
+        Err("当前平台暂未内置一键安装 Rust 工具链，请先手动安装。".to_string())
     }
 
-    #[cfg(all(unix, not(target_os = "macos")))]
+    #[cfg(not(target_os = "windows"))]
     {
-        if command_exists("apt-get") {
+        #[cfg(target_os = "macos")]
+        {
             emit_remote_deploy_progress(
                 app,
                 server,
                 "preparingBuilder",
                 10,
-                Some("sudo apt-get update && sudo apt-get install -y cargo rustc".to_string()),
+                Some("brew install rust".to_string()),
             );
-            run_shell_install_command(
-                "sudo apt-get update && sudo apt-get install -y cargo rustc",
-                "通过 apt-get 安装 Rust 工具链失败",
+            ensure_command_available(
+                "brew",
+                "未检测到 Homebrew，请先安装 brew 后再自动安装 Rust 工具链。",
             )?;
-        } else if command_exists("dnf") {
-            emit_remote_deploy_progress(
-                app,
-                server,
-                "preparingBuilder",
-                10,
-                Some("sudo dnf install -y cargo rust rustup".to_string()),
-            );
-            run_shell_install_command(
-                "sudo dnf install -y cargo rust rustup",
-                "通过 dnf 安装 Rust 工具链失败",
+            run_install_command(
+                "brew",
+                &["install", "rust"],
+                "通过 Homebrew 安装 Rust 工具链失败",
             )?;
-        } else if command_exists("yum") {
-            emit_remote_deploy_progress(
-                app,
-                server,
-                "preparingBuilder",
-                10,
-                Some("sudo yum install -y cargo rust rustup".to_string()),
-            );
-            run_shell_install_command(
-                "sudo yum install -y cargo rust rustup",
-                "通过 yum 安装 Rust 工具链失败",
-            )?;
-        } else if command_exists("pacman") {
-            emit_remote_deploy_progress(
-                app,
-                server,
-                "preparingBuilder",
-                10,
-                Some("sudo pacman -Sy --noconfirm rustup cargo".to_string()),
-            );
-            run_shell_install_command(
-                "sudo pacman -Sy --noconfirm rustup cargo",
-                "通过 pacman 安装 Rust 工具链失败",
-            )?;
-        } else {
-            return Err("当前平台暂未内置一键安装 Rust 工具链，请先手动安装。".to_string());
         }
-    }
 
-    if !command_exists("cargo") {
-        return Err("自动安装 Rust 工具链后仍未检测到 cargo 命令。".to_string());
-    }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            if command_exists("apt-get") {
+                emit_remote_deploy_progress(
+                    app,
+                    server,
+                    "preparingBuilder",
+                    10,
+                    Some("sudo apt-get update && sudo apt-get install -y cargo rustc".to_string()),
+                );
+                run_shell_install_command(
+                    "sudo apt-get update && sudo apt-get install -y cargo rustc",
+                    "通过 apt-get 安装 Rust 工具链失败",
+                )?;
+            } else if command_exists("dnf") {
+                emit_remote_deploy_progress(
+                    app,
+                    server,
+                    "preparingBuilder",
+                    10,
+                    Some("sudo dnf install -y cargo rust rustup".to_string()),
+                );
+                run_shell_install_command(
+                    "sudo dnf install -y cargo rust rustup",
+                    "通过 dnf 安装 Rust 工具链失败",
+                )?;
+            } else if command_exists("yum") {
+                emit_remote_deploy_progress(
+                    app,
+                    server,
+                    "preparingBuilder",
+                    10,
+                    Some("sudo yum install -y cargo rust rustup".to_string()),
+                );
+                run_shell_install_command(
+                    "sudo yum install -y cargo rust rustup",
+                    "通过 yum 安装 Rust 工具链失败",
+                )?;
+            } else if command_exists("pacman") {
+                emit_remote_deploy_progress(
+                    app,
+                    server,
+                    "preparingBuilder",
+                    10,
+                    Some("sudo pacman -Sy --noconfirm rustup cargo".to_string()),
+                );
+                run_shell_install_command(
+                    "sudo pacman -Sy --noconfirm rustup cargo",
+                    "通过 pacman 安装 Rust 工具链失败",
+                )?;
+            } else {
+                return Err("当前平台暂未内置一键安装 Rust 工具链，请先手动安装。".to_string());
+            }
+        }
 
-    Ok(())
+        if !command_exists("cargo") {
+            return Err("自动安装 Rust 工具链后仍未检测到 cargo 命令。".to_string());
+        }
+
+        Ok(())
+    }
 }
 
 fn ensure_linux_build_dependencies_available(

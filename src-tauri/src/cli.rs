@@ -139,35 +139,38 @@ pub(crate) fn launch_windows_store_codex() -> Result<(), String> {
 pub(crate) fn find_codex_app_path() -> Option<PathBuf> {
     #[cfg(target_os = "windows")]
     {
-        return find_windows_codex_app_path();
+        find_windows_codex_app_path()
     }
 
-    let mut candidates = vec![
-        PathBuf::from("/Applications/Codex.app"),
-        PathBuf::from("/Applications/Codex Desktop.app"),
-    ];
+    #[cfg(not(target_os = "windows"))]
+    {
+        let mut candidates = vec![
+            PathBuf::from("/Applications/Codex.app"),
+            PathBuf::from("/Applications/Codex Desktop.app"),
+        ];
 
-    if let Some(home) = dirs::home_dir() {
-        candidates.push(home.join("Applications").join("Codex.app"));
-        candidates.push(home.join("Applications").join("Codex Desktop.app"));
-    }
-
-    if let Some(found) = candidates.into_iter().find(|path| path.exists()) {
-        return Some(found);
-    }
-
-    let spotlight_queries = [
-        "kMDItemFSName == 'Codex.app'",
-        "kMDItemCFBundleIdentifier == 'com.openai.codex'",
-    ];
-
-    for query in spotlight_queries {
-        if let Some(path) = first_spotlight_match(query) {
-            return Some(path);
+        if let Some(home) = dirs::home_dir() {
+            candidates.push(home.join("Applications").join("Codex.app"));
+            candidates.push(home.join("Applications").join("Codex Desktop.app"));
         }
-    }
 
-    None
+        if let Some(found) = candidates.into_iter().find(|path| path.exists()) {
+            return Some(found);
+        }
+
+        let spotlight_queries = [
+            "kMDItemFSName == 'Codex.app'",
+            "kMDItemCFBundleIdentifier == 'com.openai.codex'",
+        ];
+
+        for query in spotlight_queries {
+            if let Some(path) = first_spotlight_match(query) {
+                return Some(path);
+            }
+        }
+
+        None
+    }
 }
 
 fn find_codex_cli_path() -> Option<PathBuf> {
@@ -810,6 +813,7 @@ fn is_macos_app_bundle(path: &Path) -> bool {
     }
 }
 
+#[cfg(not(target_os = "windows"))]
 fn first_spotlight_match(query: &str) -> Option<PathBuf> {
     let output = Command::new("mdfind").arg(query).output().ok()?;
     if !output.status.success() {

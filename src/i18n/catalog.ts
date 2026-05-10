@@ -176,6 +176,24 @@ export type MessageCatalog = {
     kicker: string;
     title: string;
     hint: string;
+    chartKicker: string;
+    chartTitle: string;
+    chartDescription: string;
+    chartRangeLabel: string;
+    chartMetricLabel: string;
+    chartCalls: string;
+    chartTokens: string;
+    chartLoadingTitle: string;
+    chartLoadingDescription: string;
+    chartEmptyTitle: string;
+    chartEmptyDescription: string;
+    chartClearHistory: string;
+    chartUpdatedAt: string;
+    loadBalanceLabel: string;
+    loadBalanceAverage: string;
+    loadBalanceSequential: string;
+    sequentialFiveHourLimitLabel: string;
+    sequentialFiveHourLimitDescription: string;
     statusLabel: string;
     statusRunning: string;
     statusStopped: string;
@@ -489,6 +507,8 @@ export type MessageCatalog = {
     proxyStopFailed: (error: string) => string;
     proxyKeyRefreshed: string;
     proxyKeyRefreshFailed: (error: string) => string;
+    apiProxyUsageCleared: string;
+    apiProxyUsageClearFailed: (error: string) => string;
     installingDependency: (name: string) => string;
     dependencyInstalled: (name: string) => string;
     dependencyInstallFailed: (name: string, error: string) => string;
@@ -629,6 +649,8 @@ function compileLocale(raw: RawMessageCatalog): MessageCatalog {
       proxyStopFailed: (error) => fillTemplate(raw.notices.proxyStopFailed, { error }),
       proxyKeyRefreshFailed: (error) =>
         fillTemplate(raw.notices.proxyKeyRefreshFailed, { error }),
+      apiProxyUsageClearFailed: (error) =>
+        fillTemplate(raw.notices.apiProxyUsageClearFailed, { error }),
       installingDependency: (name) =>
         fillTemplate(raw.notices.installingDependency, { name }),
       dependencyInstalled: (name) =>

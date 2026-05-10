@@ -1309,7 +1309,7 @@ fn validate_reauthorization_target(
     let new_label = prepared
         .email
         .as_deref()
-        .unwrap_or_else(|| prepared.account_id.as_str());
+        .unwrap_or(prepared.account_id.as_str());
     Err(format!(
         "重新授权得到的账号与目标账号不一致。目标账号: {target_label}；新账号: {new_label}。请确认浏览器登录的是同一个账号。"
     ))

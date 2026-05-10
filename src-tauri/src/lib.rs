@@ -40,6 +40,7 @@ use tauri::WindowEvent;
 
 use models::AccountSummary;
 use models::ApiProxyStatus;
+use models::ApiProxyUsageStats;
 use models::AppSettings;
 use models::AppSettingsPatch;
 use models::AuthJsonImportInput;
@@ -87,7 +88,7 @@ fn write_oauth_html_response(
     );
     let response = format!(
         "HTTP/1.1 {status_line}\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        body.as_bytes().len(),
+        body.len(),
         body
     );
     let _ = stream.write_all(response.as_bytes());
@@ -1274,6 +1275,23 @@ async fn refresh_api_proxy_key(
 }
 
 #[tauri::command]
+async fn get_api_proxy_usage_stats(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    range_seconds: Option<i64>,
+) -> Result<ApiProxyUsageStats, String> {
+    proxy_service::get_api_proxy_usage_stats_internal(&app, state.inner(), range_seconds).await
+}
+
+#[tauri::command]
+async fn clear_api_proxy_usage_stats(
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    proxy_service::clear_api_proxy_usage_stats_internal(&app, state.inner()).await
+}
+
+#[tauri::command]
 async fn get_cloudflared_status(state: State<'_, AppState>) -> Result<CloudflaredStatus, String> {
     cloudflared_service::get_cloudflared_status_internal(state.inner()).await
 }
@@ -1508,6 +1526,8 @@ pub fn run() {
             start_api_proxy,
             stop_api_proxy,
             refresh_api_proxy_key,
+            get_api_proxy_usage_stats,
+            clear_api_proxy_usage_stats,
             get_cloudflared_status,
             install_cloudflared,
             start_cloudflared_tunnel,

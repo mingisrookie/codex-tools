@@ -1,4 +1,5 @@
 use std::cmp::Ordering;
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::fs;
@@ -41,6 +42,8 @@ use futures_util::SinkExt;
 use futures_util::Stream;
 use futures_util::StreamExt;
 use if_addrs::IfAddr;
+use serde::Deserialize;
+use serde::Serialize;
 use serde_json::json;
 use serde_json::Map;
 use serde_json::Value;
@@ -63,7 +66,12 @@ use crate::auth::refresh_chatgpt_auth_tokens_serialized;
 use crate::dashboard_metrics;
 use crate::dashboard_metrics::DashboardMetricEvent;
 use crate::dashboard_metrics::DashboardTokenUsage;
+use crate::models::normalize_api_proxy_sequential_five_hour_limit_percent;
+use crate::models::ApiProxyLoadBalanceMode;
 use crate::models::ApiProxyStatus;
+use crate::models::ApiProxyUsagePoint;
+use crate::models::ApiProxyUsageSeries;
+use crate::models::ApiProxyUsageStats;
 use crate::models::AppSettings;
 use crate::models::StoredAccount;
 use crate::models::UsageSnapshot;
@@ -132,6 +140,15 @@ const RESPONSE_MODEL_NORMALIZATIONS: &[(&str, &str)] = &[
     ("gpt-5-4", "gpt-5.4"),
 ];
 const UNSUPPORTED_RESPONSES_REQUEST_FIELDS: &[&str] = &["metadata", "prompt_cache_retention"];
+const API_PROXY_USAGE_FILE_NAME: &str = "api-proxy-usage.json";
+const API_PROXY_USAGE_STORE_VERSION: u8 = 1;
+const API_PROXY_USAGE_RETENTION_SECONDS: i64 = 30 * 24 * 60 * 60;
+const API_PROXY_USAGE_RANGE_1H_SECONDS: i64 = 60 * 60;
+const API_PROXY_USAGE_RANGE_24H_SECONDS: i64 = 24 * 60 * 60;
+const API_PROXY_USAGE_RANGE_7D_SECONDS: i64 = 7 * 24 * 60 * 60;
+const API_PROXY_USAGE_RANGE_14D_SECONDS: i64 = 14 * 24 * 60 * 60;
+const API_PROXY_USAGE_RANGE_30D_SECONDS: i64 = 30 * 24 * 60 * 60;
+const DEFAULT_API_PROXY_USAGE_RANGE_SECONDS: i64 = API_PROXY_USAGE_RANGE_24H_SECONDS;
 
 #[derive(Clone)]
 pub(crate) struct ProxyStorageContext {
@@ -156,6 +173,70 @@ struct ProxyCandidate {
     auth_refresh_blocked: bool,
     auth_refresh_error: Option<String>,
     updated_at: i64,
+}
+
+struct ProxyCandidateSelection {
+    candidates: Vec<ProxyCandidate>,
+    load_balance: ProxyLoadBalanceConfig,
+    persisted_sequential_account_key: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+struct ApiProxyUsageMetadata {
+    model: String,
+    route: String,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct ApiProxyUsageEvent {
+    timestamp: i64,
+    model: String,
+    calls: i64,
+    tokens: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct ApiProxyUsageStore {
+    version: u8,
+    updated_at: i64,
+    events: Vec<ApiProxyUsageEvent>,
+}
+
+impl Default for ApiProxyUsageStore {
+    fn default() -> Self {
+        Self {
+            version: API_PROXY_USAGE_STORE_VERSION,
+            updated_at: 0,
+            events: Vec::new(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct ApiProxyUsageSeriesAccumulator {
+    total_calls: i64,
+    total_tokens: i64,
+    points: BTreeMap<i64, (i64, i64)>,
+}
+
+#[derive(Clone, Copy)]
+struct ProxyLoadBalanceConfig {
+    mode: ApiProxyLoadBalanceMode,
+    sequential_five_hour_limit_percent: f64,
+}
+
+impl ProxyLoadBalanceConfig {
+    fn from_settings(settings: &AppSettings) -> Self {
+        Self {
+            mode: settings.api_proxy_load_balance_mode,
+            sequential_five_hour_limit_percent:
+                normalize_api_proxy_sequential_five_hour_limit_percent(
+                    settings.api_proxy_sequential_five_hour_limit_percent,
+                ),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -531,6 +612,60 @@ pub(crate) async fn get_api_proxy_status_with_runtime(
             None,
         )),
     }
+}
+
+#[cfg(feature = "desktop")]
+pub(crate) async fn get_api_proxy_usage_stats_internal(
+    app: &AppHandle,
+    state: &AppState,
+    range_seconds: Option<i64>,
+) -> Result<ApiProxyUsageStats, String> {
+    let storage = app_proxy_storage_context(app, state)?;
+    get_api_proxy_usage_stats_with_storage(&storage, range_seconds).await
+}
+
+pub(crate) async fn get_api_proxy_usage_stats_with_storage(
+    storage: &ProxyStorageContext,
+    range_seconds: Option<i64>,
+) -> Result<ApiProxyUsageStats, String> {
+    let now = now_unix_seconds();
+    let range_seconds = normalize_api_proxy_usage_range_seconds(range_seconds);
+    let _guard = storage.store_lock.lock().await;
+    let path = api_proxy_usage_path(storage)?;
+    let should_scrub_legacy_fields = api_proxy_usage_store_has_legacy_private_fields(&path);
+    let mut store = load_api_proxy_usage_store_from_path(&path)?;
+    if prune_api_proxy_usage_events(&mut store.events, now) || should_scrub_legacy_fields {
+        store.updated_at = now;
+        save_api_proxy_usage_store_to_path(&path, &store)?;
+    }
+
+    Ok(build_api_proxy_usage_stats(
+        &store.events,
+        now,
+        range_seconds,
+    ))
+}
+
+#[cfg(feature = "desktop")]
+pub(crate) async fn clear_api_proxy_usage_stats_internal(
+    app: &AppHandle,
+    state: &AppState,
+) -> Result<(), String> {
+    let storage = app_proxy_storage_context(app, state)?;
+    clear_api_proxy_usage_stats_with_storage(&storage).await
+}
+
+pub(crate) async fn clear_api_proxy_usage_stats_with_storage(
+    storage: &ProxyStorageContext,
+) -> Result<(), String> {
+    let now = now_unix_seconds();
+    let _guard = storage.store_lock.lock().await;
+    let path = api_proxy_usage_path(storage)?;
+    let store = ApiProxyUsageStore {
+        updated_at: now,
+        ..ApiProxyUsageStore::default()
+    };
+    save_api_proxy_usage_store_to_path(&path, &store)
 }
 
 #[cfg(feature = "desktop")]
@@ -938,18 +1073,26 @@ async fn chat_completions_handler(
             Err(message) => return invalid_request_response(&message),
         };
 
-    let upstream =
-        match send_codex_request_over_candidates(&context, &headers, &upstream_payload).await {
-            Ok(value) => value,
-            Err(response) => return response,
-        };
+    let upstream = match send_codex_request_over_candidates(
+        &context,
+        "/v1/chat/completions",
+        &headers,
+        &upstream_payload,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
 
     let (candidate, upstream_response) = upstream;
     update_proxy_target(&context, &candidate).await;
     update_proxy_error(&context, None).await;
+    let usage_metadata =
+        api_proxy_usage_metadata(&candidate, "/v1/chat/completions", &upstream_payload);
 
     if downstream_stream {
-        build_chat_streaming_response(upstream_response)
+        build_chat_streaming_response(upstream_response, context.storage.clone(), usage_metadata)
     } else {
         let (upstream_headers, upstream_body) = match upstream_response.into_bytes().await {
             Ok(value) => value,
@@ -967,6 +1110,7 @@ async fn chat_completions_handler(
                 return json_error_response(StatusCode::BAD_GATEWAY, &message);
             }
         };
+        record_api_proxy_tokens_from_response(&context.storage, &usage_metadata, &completed).await;
 
         let body =
             match serde_json::to_vec(&convert_completed_response_to_chat_completion(&completed)) {
@@ -1034,18 +1178,25 @@ async fn responses_handler(
         };
 
     trace.log("upstream_request_start", "");
-    let upstream =
-        match send_codex_request_over_candidates(&context, &headers, &upstream_payload).await {
-            Ok(value) => value,
-            Err(response) => {
-                trace.log("upstream_request_failed", "");
-                trace.finish(
-                    Some(response.status().as_u16()),
-                    Some("upstream_request_failed"),
-                );
-                return response;
-            }
-        };
+    trace.log("upstream_request_start", "");
+    let upstream = match send_codex_request_over_candidates(
+        &context,
+        "/v1/responses",
+        &headers,
+        &upstream_payload,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => {
+            trace.log("upstream_request_failed", "");
+            trace.finish(
+                Some(response.status().as_u16()),
+                Some("upstream_request_failed"),
+            );
+            return response;
+        }
+    };
 
     let (candidate, upstream_response) = upstream;
     trace.set_account_label(Some(candidate.label.clone()));
@@ -1060,9 +1211,15 @@ async fn responses_handler(
     );
     update_proxy_target(&context, &candidate).await;
     update_proxy_error(&context, None).await;
+    let usage_metadata = api_proxy_usage_metadata(&candidate, "/v1/responses", &upstream_payload);
 
     if downstream_stream {
-        build_passthrough_sse_response(upstream_response, trace)
+        build_passthrough_sse_response(
+            upstream_response,
+            trace,
+            context.storage.clone(),
+            usage_metadata,
+        )
     } else {
         trace.log("non_stream_body_read_start", "");
         let (upstream_headers, upstream_body) = match upstream_response.into_bytes().await {
@@ -1101,6 +1258,7 @@ async fn responses_handler(
                 return json_error_response(StatusCode::BAD_GATEWAY, &message);
             }
         };
+        record_api_proxy_tokens_from_response(&context.storage, &usage_metadata, &completed).await;
 
         let completed = rewrite_response_models_for_client(completed);
         let body = match serde_json::to_vec(&completed) {
@@ -1149,7 +1307,7 @@ async fn image_generations_handler(
         Err(message) => return invalid_request_response(&message),
     };
 
-    forward_image_request(context, headers, image_request).await
+    forward_image_request(context, "/v1/images/generations", headers, image_request).await
 }
 
 async fn image_edits_handler(
@@ -1170,7 +1328,7 @@ async fn image_edits_handler(
         Err(message) => return invalid_request_response(&message),
     };
 
-    forward_image_request(context, headers, image_request).await
+    forward_image_request(context, "/v1/images/edits", headers, image_request).await
 }
 
 async fn image_variations_handler(
@@ -1191,11 +1349,12 @@ async fn image_variations_handler(
         Err(message) => return invalid_request_response(&message),
     };
 
-    forward_image_request(context, headers, image_request).await
+    forward_image_request(context, "/v1/images/variations", headers, image_request).await
 }
 
 async fn forward_image_request(
     context: Arc<ProxyContext>,
+    route: &'static str,
     headers: HeaderMap,
     image_request: ConvertedImageRequest,
 ) -> Response<Body> {
@@ -1205,41 +1364,52 @@ async fn forward_image_request(
         image_count,
     } = image_request;
 
-    let upstream =
-        match send_codex_request_over_candidates(&context, &headers, &upstream_payload).await {
-            Ok(value) => value,
-            Err(response) => return response,
-        };
+    let upstream = match send_codex_request_over_candidates(
+        &context,
+        route,
+        &headers,
+        &upstream_payload,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
 
     let (candidate, upstream_response) = upstream;
     update_proxy_target(&context, &candidate).await;
     update_proxy_error(&context, None).await;
+    let usage_metadata = api_proxy_usage_metadata(&candidate, route, &upstream_payload);
 
     if downstream_stream {
-        build_image_streaming_response(upstream_response)
+        build_image_streaming_response(upstream_response, context.storage.clone(), usage_metadata)
     } else {
         let mut upstream_headers = HeaderMap::new();
         let mut created = now_unix_seconds();
         let mut data = Vec::new();
-        let mut first_upstream_response = Some(upstream_response);
+        let mut first_upstream = Some((candidate, upstream_response));
 
         for index in 0..image_count {
-            let upstream_response = if index == 0 {
-                first_upstream_response
+            let (candidate, upstream_response) = if index == 0 {
+                first_upstream
                     .take()
                     .expect("first image upstream response should be present")
             } else {
-                let upstream =
-                    match send_codex_request_over_candidates(&context, &headers, &upstream_payload)
-                        .await
-                    {
-                        Ok(value) => value,
-                        Err(response) => return response,
-                    };
+                let upstream = match send_codex_request_over_candidates(
+                    &context,
+                    route,
+                    &headers,
+                    &upstream_payload,
+                )
+                .await
+                {
+                    Ok(value) => value,
+                    Err(response) => return response,
+                };
                 let (candidate, upstream_response) = upstream;
                 update_proxy_target(&context, &candidate).await;
                 update_proxy_error(&context, None).await;
-                upstream_response
+                (candidate, upstream_response)
             };
 
             let (headers, upstream_body) = match upstream_response.into_bytes().await {
@@ -1259,6 +1429,9 @@ async fn forward_image_request(
                     return json_error_response(StatusCode::BAD_GATEWAY, &message);
                 }
             };
+            let usage_metadata = api_proxy_usage_metadata(&candidate, route, &upstream_payload);
+            record_api_proxy_tokens_from_response(&context.storage, &usage_metadata, &completed)
+                .await;
             let converted = match convert_responses_image_output_to_images_response(&completed) {
                 Ok(value) => value,
                 Err(message) => {
@@ -1329,25 +1502,40 @@ async fn handle_responses_websocket(
         }
     };
 
-    let upstream =
-        match send_codex_request_over_candidates(&context, &headers, &upstream_payload).await {
-            Ok(value) => value,
-            Err(response) => {
-                let message = format!(
-                    "Codex upstream request failed with status {}",
-                    response.status()
-                );
-                let _ = send_responses_websocket_error(&mut socket, &message).await;
-                let _ = socket.close().await;
-                return;
-            }
-        };
+    let upstream = match send_codex_request_over_candidates(
+        &context,
+        "/v1/responses websocket",
+        &headers,
+        &upstream_payload,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => {
+            let message = format!(
+                "Codex upstream request failed with status {}",
+                response.status()
+            );
+            let _ = send_responses_websocket_error(&mut socket, &message).await;
+            let _ = socket.close().await;
+            return;
+        }
+    };
 
     let (candidate, upstream_response) = upstream;
     update_proxy_target(&context, &candidate).await;
     update_proxy_error(&context, None).await;
+    let usage_metadata =
+        api_proxy_usage_metadata(&candidate, "/v1/responses websocket", &upstream_payload);
 
-    if let Err(message) = relay_responses_sse_to_websocket(&mut socket, upstream_response).await {
+    if let Err(message) = relay_responses_sse_to_websocket(
+        &mut socket,
+        upstream_response,
+        context.storage.clone(),
+        usage_metadata,
+    )
+    .await
+    {
         update_proxy_error(&context, Some(message.clone())).await;
         let _ = send_responses_websocket_error(&mut socket, &message).await;
     }
@@ -1396,13 +1584,22 @@ fn normalize_responses_websocket_create(bytes: &[u8]) -> Result<Value, String> {
 async fn relay_responses_sse_to_websocket(
     socket: &mut AxumWebSocket,
     upstream: CodexUpstreamResponse,
+    usage_storage: ProxyStorageContext,
+    usage_metadata: ApiProxyUsageMetadata,
 ) -> Result<(), String> {
     let (_, mut upstream_stream) = upstream.into_stream();
     let mut decoder = SseDecoder::default();
+    let mut recorded_usage = false;
 
     while let Some(chunk) = upstream_stream.next().await {
         let chunk = chunk?;
         for event in decoder.push(&chunk) {
+            maybe_record_stream_usage_tokens(
+                &usage_storage,
+                &usage_metadata,
+                &event,
+                &mut recorded_usage,
+            );
             let done = is_responses_terminal_event(&event);
             send_responses_websocket_event(socket, &event).await?;
             if done {
@@ -1412,6 +1609,12 @@ async fn relay_responses_sse_to_websocket(
     }
 
     for event in decoder.finish() {
+        maybe_record_stream_usage_tokens(
+            &usage_storage,
+            &usage_metadata,
+            &event,
+            &mut recorded_usage,
+        );
         let done = is_responses_terminal_event(&event);
         send_responses_websocket_event(socket, &event).await?;
         if done {
@@ -1891,11 +2094,13 @@ fn guess_image_mime_type(bytes: &[u8]) -> &str {
 fn insert_multipart_text_field(fields: &mut Map<String, Value>, name: &str, value: String) {
     if name.ends_with("[]") {
         let key = name.trim_end_matches("[]").to_string();
-        fields
+        if let Some(items) = fields
             .entry(key)
             .or_insert_with(|| Value::Array(Vec::new()))
             .as_array_mut()
-            .map(|items| items.push(Value::String(value)));
+        {
+            items.push(Value::String(value));
+        }
     } else {
         fields.insert(name.to_string(), Value::String(value));
     }
@@ -2490,7 +2695,7 @@ fn websocket_event_type(data: &str) -> Option<String> {
 fn websocket_event_is_terminal(data: &str) -> bool {
     matches!(
         websocket_event_type(data).as_deref(),
-        Some("response.completed" | "response.failed")
+        Some("response.completed" | "response.done" | "response.failed")
     )
 }
 
@@ -2739,11 +2944,12 @@ fn map_text_settings(root: &mut Map<String, Value>, text: &Value) {
 
 async fn send_codex_request_over_candidates(
     context: &ProxyContext,
+    route: &str,
     headers: &HeaderMap,
     payload: &Value,
 ) -> Result<(ProxyCandidate, CodexUpstreamResponse), Response<Body>> {
-    let candidates = match load_proxy_candidates(&context.storage).await {
-        Ok(items) if !items.is_empty() => items,
+    let selection = match load_proxy_candidate_selection(&context.storage).await {
+        Ok(selection) if !selection.candidates.is_empty() => selection,
         Ok(_) => {
             return Err(json_error_response(
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -2755,6 +2961,15 @@ async fn send_codex_request_over_candidates(
             return Err(json_error_response(StatusCode::BAD_GATEWAY, &error));
         }
     };
+    let current_sequential_account_key = sequential_account_key_for_request(
+        current_sequential_proxy_account_key(context).await,
+        selection.persisted_sequential_account_key,
+    );
+    let candidates = order_proxy_candidates_for_request(
+        selection.candidates,
+        selection.load_balance,
+        current_sequential_account_key.as_deref(),
+    );
 
     let mut attempt_errors = Vec::new();
     let mut retriable_failures = Vec::new();
@@ -2763,6 +2978,7 @@ async fn send_codex_request_over_candidates(
         let mut did_refresh = false;
 
         loop {
+            log_proxy_request_route(route);
             let upstream =
                 match forward_codex_request_with_candidate(context, &candidate, headers, payload)
                     .await
@@ -2775,7 +2991,9 @@ async fn send_codex_request_over_candidates(
                 };
 
             let status = upstream.status();
+            log_proxy_response_route(route, status);
             if status.is_success() {
+                record_api_proxy_call_success(context, &candidate, route, payload).await;
                 return Ok((candidate, upstream));
             }
 
@@ -3013,8 +3231,17 @@ async fn forward_codex_websocket_request_with_candidate(
 async fn load_proxy_candidates(
     storage: &ProxyStorageContext,
 ) -> Result<Vec<ProxyCandidate>, String> {
+    load_proxy_candidate_selection(storage)
+        .await
+        .map(|selection| selection.candidates)
+}
+
+async fn load_proxy_candidate_selection(
+    storage: &ProxyStorageContext,
+) -> Result<ProxyCandidateSelection, String> {
     let _guard = storage.store_lock.lock().await;
     let store = load_store_from_path(&account_store_path_from_data_dir(&storage.data_dir))?;
+    let load_balance = ProxyLoadBalanceConfig::from_settings(&store.settings);
 
     let mut deduped: HashMap<String, ProxyCandidate> = HashMap::new();
     for candidate in store
@@ -3031,9 +3258,11 @@ async fn load_proxy_candidates(
         }
     }
 
-    let mut candidates = deduped.into_values().collect::<Vec<_>>();
-    candidates.sort_by(compare_proxy_candidates);
-    Ok(candidates)
+    Ok(ProxyCandidateSelection {
+        candidates: deduped.into_values().collect(),
+        load_balance,
+        persisted_sequential_account_key: store.settings.api_proxy_sequential_account_key,
+    })
 }
 
 fn account_to_proxy_candidate(account: StoredAccount) -> Option<ProxyCandidate> {
@@ -3069,6 +3298,100 @@ fn should_replace_proxy_candidate(existing: &ProxyCandidate, candidate: &ProxyCa
     candidate.updated_at > existing.updated_at
 }
 
+fn log_proxy_request_route(route: &str) {
+    log::info!("API proxy request route={route}");
+}
+
+fn log_proxy_response_route(route: &str, status: StatusCode) {
+    log::info!(
+        "API proxy response route={route} status={}",
+        status.as_u16(),
+    );
+}
+
+fn order_proxy_candidates_for_request(
+    mut candidates: Vec<ProxyCandidate>,
+    load_balance: ProxyLoadBalanceConfig,
+    current_sequential_account_key: Option<&str>,
+) -> Vec<ProxyCandidate> {
+    candidates.sort_by(compare_proxy_candidates);
+
+    if !matches!(load_balance.mode, ApiProxyLoadBalanceMode::Sequential) {
+        return candidates;
+    }
+
+    let Some(current_key) = current_sequential_account_key else {
+        return candidates;
+    };
+
+    if let Some(current_index) = candidates
+        .iter()
+        .position(|candidate| candidate.account_key == current_key)
+    {
+        if can_reuse_sequential_candidate(
+            &candidates[current_index],
+            load_balance.sequential_five_hour_limit_percent,
+        ) {
+            let current = candidates.remove(current_index);
+            candidates.insert(0, current);
+            return candidates;
+        }
+
+        candidates.sort_by(|left, right| {
+            compare_sequential_switch_candidates(
+                left,
+                right,
+                current_key,
+                load_balance.sequential_five_hour_limit_percent,
+            )
+        });
+    }
+
+    candidates
+}
+
+fn sequential_account_key_for_request(
+    runtime_account_key: Option<String>,
+    persisted_account_key: Option<String>,
+) -> Option<String> {
+    runtime_account_key.or(persisted_account_key)
+}
+
+fn can_reuse_sequential_candidate(candidate: &ProxyCandidate, limit_percent: f64) -> bool {
+    !candidate.auth_refresh_blocked && is_under_sequential_limit(candidate, limit_percent)
+}
+
+fn compare_sequential_switch_candidates(
+    left: &ProxyCandidate,
+    right: &ProxyCandidate,
+    current_key: &str,
+    limit_percent: f64,
+) -> Ordering {
+    sequential_switch_rank(left, current_key, limit_percent)
+        .cmp(&sequential_switch_rank(right, current_key, limit_percent))
+        .then_with(|| compare_proxy_candidates(left, right))
+}
+
+fn sequential_switch_rank(candidate: &ProxyCandidate, current_key: &str, limit_percent: f64) -> u8 {
+    if candidate.auth_refresh_blocked {
+        return 3;
+    }
+    if candidate.account_key == current_key {
+        return 2;
+    }
+    if is_under_sequential_limit(candidate, limit_percent) {
+        0
+    } else {
+        1
+    }
+}
+
+fn is_under_sequential_limit(candidate: &ProxyCandidate, limit_percent: f64) -> bool {
+    five_hour_used_percent(candidate)
+        .map(|used_percent| used_percent < limit_percent)
+        .unwrap_or(true)
+}
+
 fn compare_proxy_candidates(left: &ProxyCandidate, right: &ProxyCandidate) -> Ordering {
     match left.auth_refresh_blocked.cmp(&right.auth_refresh_blocked) {
         Ordering::Equal => {}
@@ -3080,14 +3403,14 @@ fn compare_proxy_candidates(left: &ProxyCandidate, right: &ProxyCandidate) -> Or
         ordering => return ordering,
     }
 
-    match remaining_percent(
-        right
-            .usage
+    match usage_window_used_percent(
+        left.usage
             .as_ref()
             .and_then(|usage| usage.one_week.as_ref()),
     )
-    .cmp(&remaining_percent(
-        left.usage
+    .total_cmp(&usage_window_used_percent(
+        right
+            .usage
             .as_ref()
             .and_then(|usage| usage.one_week.as_ref()),
     )) {
@@ -3095,14 +3418,14 @@ fn compare_proxy_candidates(left: &ProxyCandidate, right: &ProxyCandidate) -> Or
         ordering => return ordering,
     }
 
-    match remaining_percent(
-        right
-            .usage
+    match usage_window_used_percent(
+        left.usage
             .as_ref()
             .and_then(|usage| usage.five_hour.as_ref()),
     )
-    .cmp(&remaining_percent(
-        left.usage
+    .total_cmp(&usage_window_used_percent(
+        right
+            .usage
             .as_ref()
             .and_then(|usage| usage.five_hour.as_ref()),
     )) {
@@ -3110,7 +3433,9 @@ fn compare_proxy_candidates(left: &ProxyCandidate, right: &ProxyCandidate) -> Or
         ordering => return ordering,
     }
 
-    left.label.cmp(&right.label)
+    left.label
+        .cmp(&right.label)
+        .then_with(|| left.account_key.cmp(&right.account_key))
 }
 
 fn is_free_plan(plan_type: &Option<String>) -> bool {
@@ -3120,10 +3445,25 @@ fn is_free_plan(plan_type: &Option<String>) -> bool {
         .unwrap_or(false)
 }
 
-fn remaining_percent(window: Option<&UsageWindow>) -> i32 {
-    match window {
-        Some(window) => (100.0 - window.used_percent).round().clamp(0.0, 100.0) as i32,
-        None => -1,
+fn five_hour_used_percent(candidate: &ProxyCandidate) -> Option<f64> {
+    candidate
+        .usage
+        .as_ref()
+        .and_then(|usage| usage.five_hour.as_ref())
+        .and_then(finite_used_percent)
+}
+
+fn usage_window_used_percent(window: Option<&UsageWindow>) -> f64 {
+    window
+        .and_then(finite_used_percent)
+        .unwrap_or(f64::INFINITY)
+}
+
+fn finite_used_percent(window: &UsageWindow) -> Option<f64> {
+    if window.used_percent.is_finite() {
+        Some(window.used_percent.clamp(0.0, 100.0))
+    } else {
+        None
     }
 }
 
@@ -3589,17 +3929,404 @@ fn api_proxy_key_path(storage: &ProxyStorageContext) -> Result<PathBuf, String> 
     Ok(storage.data_dir.join("api-proxy.key"))
 }
 
+fn api_proxy_usage_path(storage: &ProxyStorageContext) -> Result<PathBuf, String> {
+    Ok(storage.data_dir.join(API_PROXY_USAGE_FILE_NAME))
+}
+
+async fn record_api_proxy_call_success(
+    context: &ProxyContext,
+    candidate: &ProxyCandidate,
+    route: &str,
+    payload: &Value,
+) {
+    let metadata = api_proxy_usage_metadata(candidate, route, payload);
+    if let Err(error) = append_api_proxy_usage_event(
+        &context.storage,
+        api_proxy_usage_event(&metadata, 1, 0, now_unix_seconds()),
+    )
+    .await
+    {
+        log::warn!("记录 API 反代调用统计失败 route={route}: {error}");
+    }
+}
+
+async fn record_api_proxy_tokens_from_response(
+    storage: &ProxyStorageContext,
+    metadata: &ApiProxyUsageMetadata,
+    response: &Value,
+) {
+    let Some(tokens) = api_proxy_usage_tokens_from_response(response) else {
+        return;
+    };
+
+    if let Err(error) = append_api_proxy_usage_event(
+        storage,
+        api_proxy_usage_event(metadata, 0, tokens, now_unix_seconds()),
+    )
+    .await
+    {
+        log::warn!(
+            "记录 API 反代 token 统计失败 route={} model={}: {}",
+            metadata.route,
+            metadata.model,
+            error
+        );
+    }
+}
+
+fn maybe_record_stream_usage_tokens(
+    storage: &ProxyStorageContext,
+    metadata: &ApiProxyUsageMetadata,
+    event: &SseEvent,
+    recorded_usage: &mut bool,
+) {
+    if *recorded_usage {
+        return;
+    }
+    let Some(tokens) = api_proxy_usage_tokens_from_sse_event(event) else {
+        return;
+    };
+
+    *recorded_usage = true;
+    let storage = storage.clone();
+    let metadata = metadata.clone();
+    tokio::spawn(async move {
+        if let Err(error) = append_api_proxy_usage_event(
+            &storage,
+            api_proxy_usage_event(&metadata, 0, tokens, now_unix_seconds()),
+        )
+        .await
+        {
+            log::warn!(
+                "记录 API 反代流式 token 统计失败 route={} model={}: {}",
+                metadata.route,
+                metadata.model,
+                error
+            );
+        }
+    });
+}
+
+fn api_proxy_usage_metadata(
+    _candidate: &ProxyCandidate,
+    route: &str,
+    payload: &Value,
+) -> ApiProxyUsageMetadata {
+    ApiProxyUsageMetadata {
+        model: api_proxy_usage_model_from_payload(payload),
+        route: route.to_string(),
+    }
+}
+
+fn api_proxy_usage_model_from_payload(payload: &Value) -> String {
+    payload
+        .get("model")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(normalize_model_for_client)
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn api_proxy_usage_event(
+    metadata: &ApiProxyUsageMetadata,
+    calls: i64,
+    tokens: i64,
+    timestamp: i64,
+) -> ApiProxyUsageEvent {
+    ApiProxyUsageEvent {
+        timestamp,
+        model: metadata.model.clone(),
+        calls,
+        tokens,
+    }
+}
+
+async fn append_api_proxy_usage_event(
+    storage: &ProxyStorageContext,
+    mut event: ApiProxyUsageEvent,
+) -> Result<(), String> {
+    event.calls = event.calls.max(0);
+    event.tokens = event.tokens.max(0);
+    if event.calls == 0 && event.tokens == 0 {
+        return Ok(());
+    }
+    if event.model.trim().is_empty() {
+        event.model = "unknown".to_string();
+    }
+    let now = now_unix_seconds();
+    if event.timestamp <= 0 {
+        event.timestamp = now;
+    }
+
+    let _guard = storage.store_lock.lock().await;
+    let path = api_proxy_usage_path(storage)?;
+    let mut store = load_api_proxy_usage_store_from_path(&path)?;
+    store.events.push(event);
+    prune_api_proxy_usage_events(&mut store.events, now);
+    store.updated_at = now;
+    save_api_proxy_usage_store_to_path(&path, &store)
+}
+
+fn load_api_proxy_usage_store_from_path(path: &Path) -> Result<ApiProxyUsageStore, String> {
+    if !path.exists() {
+        return Ok(ApiProxyUsageStore::default());
+    }
+
+    let raw = fs::read_to_string(path)
+        .map_err(|error| format!("读取 API 反代统计存储失败 {}: {error}", path.display()))?;
+    if raw.trim().is_empty() {
+        return Ok(ApiProxyUsageStore::default());
+    }
+
+    match serde_json::from_str::<ApiProxyUsageStore>(&raw) {
+        Ok(mut store) => {
+            store.version = API_PROXY_USAGE_STORE_VERSION;
+            Ok(store)
+        }
+        Err(error) => {
+            log::warn!(
+                "API 反代统计存储格式无效，已忽略 {}: {}",
+                path.display(),
+                error
+            );
+            Ok(ApiProxyUsageStore::default())
+        }
+    }
+}
+
+fn api_proxy_usage_store_has_legacy_private_fields(path: &Path) -> bool {
+    if !path.exists() {
+        return false;
+    }
+
+    fs::read_to_string(path).is_ok_and(|raw| {
+        raw.contains("accountKey")
+            || raw.contains("accountId")
+            || raw.contains("accountLabel")
+            || raw.contains("route")
+    })
+}
+
+fn save_api_proxy_usage_store_to_path(
+    path: &Path,
+    store: &ApiProxyUsageStore,
+) -> Result<(), String> {
+    let serialized = serde_json::to_string_pretty(store)
+        .map_err(|error| format!("序列化 API 反代统计存储失败: {error}"))?;
+    write_private_named_file_atomically(path, serialized.as_bytes(), "API 反代统计")
+}
+
+fn prune_api_proxy_usage_events(events: &mut Vec<ApiProxyUsageEvent>, now: i64) -> bool {
+    let cutoff = now.saturating_sub(API_PROXY_USAGE_RETENTION_SECONDS);
+    let before = events.len();
+    events.retain(|event| {
+        event.timestamp >= cutoff
+            && !event.model.trim().is_empty()
+            && (event.calls.max(0) > 0 || event.tokens.max(0) > 0)
+    });
+    before != events.len()
+}
+
+fn build_api_proxy_usage_stats(
+    events: &[ApiProxyUsageEvent],
+    now: i64,
+    range_seconds: i64,
+) -> ApiProxyUsageStats {
+    let range_seconds = normalize_api_proxy_usage_range_seconds(Some(range_seconds));
+    let bucket_seconds = api_proxy_usage_bucket_seconds(range_seconds);
+    let start = now.saturating_sub(range_seconds);
+    let first_bucket = floor_timestamp_to_bucket(start, bucket_seconds);
+    let last_bucket = floor_timestamp_to_bucket(now, bucket_seconds);
+    let bucket_timestamps =
+        api_proxy_usage_bucket_timestamps(first_bucket, last_bucket, bucket_seconds);
+
+    let mut by_model = BTreeMap::<String, ApiProxyUsageSeriesAccumulator>::new();
+    for event in events {
+        if event.timestamp < start || event.timestamp > now {
+            continue;
+        }
+        let model = event.model.trim();
+        if model.is_empty() {
+            continue;
+        }
+        let calls = event.calls.max(0);
+        let tokens = event.tokens.max(0);
+        if calls == 0 && tokens == 0 {
+            continue;
+        }
+
+        let bucket = floor_timestamp_to_bucket(event.timestamp, bucket_seconds);
+        let accumulator = by_model.entry(model.to_string()).or_default();
+        accumulator.total_calls += calls;
+        accumulator.total_tokens += tokens;
+        let point = accumulator.points.entry(bucket).or_insert((0, 0));
+        point.0 += calls;
+        point.1 += tokens;
+    }
+
+    let mut series = by_model
+        .into_iter()
+        .map(|(model, accumulator)| ApiProxyUsageSeries {
+            model,
+            total_calls: accumulator.total_calls,
+            total_tokens: accumulator.total_tokens,
+            points: bucket_timestamps
+                .iter()
+                .map(|timestamp| {
+                    let (calls, tokens) = accumulator
+                        .points
+                        .get(timestamp)
+                        .copied()
+                        .unwrap_or_default();
+                    ApiProxyUsagePoint {
+                        timestamp: *timestamp,
+                        calls,
+                        tokens,
+                    }
+                })
+                .collect(),
+        })
+        .collect::<Vec<_>>();
+
+    series.sort_by(|left, right| {
+        right
+            .total_calls
+            .cmp(&left.total_calls)
+            .then_with(|| right.total_tokens.cmp(&left.total_tokens))
+            .then_with(|| left.model.cmp(&right.model))
+    });
+
+    ApiProxyUsageStats {
+        updated_at: now,
+        range_seconds,
+        bucket_seconds,
+        series,
+    }
+}
+
+fn normalize_api_proxy_usage_range_seconds(range_seconds: Option<i64>) -> i64 {
+    let requested = range_seconds
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_API_PROXY_USAGE_RANGE_SECONDS);
+
+    if requested <= API_PROXY_USAGE_RANGE_1H_SECONDS {
+        API_PROXY_USAGE_RANGE_1H_SECONDS
+    } else if requested <= API_PROXY_USAGE_RANGE_24H_SECONDS {
+        API_PROXY_USAGE_RANGE_24H_SECONDS
+    } else if requested <= API_PROXY_USAGE_RANGE_7D_SECONDS {
+        API_PROXY_USAGE_RANGE_7D_SECONDS
+    } else if requested <= API_PROXY_USAGE_RANGE_14D_SECONDS {
+        API_PROXY_USAGE_RANGE_14D_SECONDS
+    } else {
+        API_PROXY_USAGE_RANGE_30D_SECONDS
+    }
+}
+
+fn api_proxy_usage_bucket_seconds(range_seconds: i64) -> i64 {
+    match range_seconds {
+        API_PROXY_USAGE_RANGE_1H_SECONDS => 60,
+        API_PROXY_USAGE_RANGE_24H_SECONDS => 30 * 60,
+        API_PROXY_USAGE_RANGE_7D_SECONDS => 6 * 60 * 60,
+        API_PROXY_USAGE_RANGE_14D_SECONDS => 12 * 60 * 60,
+        API_PROXY_USAGE_RANGE_30D_SECONDS => 24 * 60 * 60,
+        _ => 30 * 60,
+    }
+}
+
+fn api_proxy_usage_bucket_timestamps(first: i64, last: i64, bucket_seconds: i64) -> Vec<i64> {
+    if bucket_seconds <= 0 || last < first {
+        return Vec::new();
+    }
+
+    let mut timestamps = Vec::new();
+    let mut current = first;
+    while current <= last {
+        timestamps.push(current);
+        current = match current.checked_add(bucket_seconds) {
+            Some(value) => value,
+            None => break,
+        };
+    }
+    timestamps
+}
+
+fn floor_timestamp_to_bucket(timestamp: i64, bucket_seconds: i64) -> i64 {
+    if bucket_seconds <= 0 {
+        return timestamp;
+    }
+    timestamp - timestamp.rem_euclid(bucket_seconds)
+}
+
+fn api_proxy_usage_tokens_from_response(response: &Value) -> Option<i64> {
+    response
+        .get("usage")
+        .and_then(api_proxy_usage_tokens_from_usage)
+}
+
+fn api_proxy_usage_tokens_from_sse_event(event: &SseEvent) -> Option<i64> {
+    let parsed = serde_json::from_str::<Value>(&event.data).ok()?;
+    let event_type = parsed
+        .get("type")
+        .and_then(Value::as_str)
+        .or(event.event.as_deref())?;
+    if !matches!(event_type, "response.completed" | "response.done") {
+        return None;
+    }
+
+    parsed
+        .get("response")
+        .and_then(api_proxy_usage_tokens_from_response)
+        .or_else(|| {
+            parsed
+                .get("usage")
+                .and_then(api_proxy_usage_tokens_from_usage)
+        })
+}
+
+fn api_proxy_usage_tokens_from_usage(usage: &Value) -> Option<i64> {
+    token_count_field(usage, "total_tokens").or_else(|| {
+        let input = token_count_field(usage, "input_tokens")
+            .or_else(|| token_count_field(usage, "prompt_tokens"))?;
+        let output = token_count_field(usage, "output_tokens")
+            .or_else(|| token_count_field(usage, "completion_tokens"))?;
+        input.checked_add(output)
+    })
+}
+
+fn token_count_field(usage: &Value, key: &str) -> Option<i64> {
+    let value = usage.get(key)?;
+    if let Some(value) = value.as_i64() {
+        return (value >= 0).then_some(value);
+    }
+    if let Some(value) = value.as_u64() {
+        return i64::try_from(value).ok();
+    }
+    value
+        .as_str()
+        .and_then(|value| value.trim().parse::<i64>().ok())
+        .filter(|value| *value >= 0)
+}
+
 #[cfg(feature = "desktop")]
 fn app_data_dir(app: &AppHandle) -> Result<PathBuf, String> {
     app_paths::app_data_dir(app)
 }
 
 fn write_private_file_atomically(path: &Path, contents: &[u8]) -> Result<(), String> {
+    write_private_named_file_atomically(path, contents, "API Key")
+}
+
+fn write_private_named_file_atomically(
+    path: &Path,
+    contents: &[u8],
+    purpose: &str,
+) -> Result<(), String> {
     let parent = path
         .parent()
-        .ok_or_else(|| format!("无法解析 API Key 存储目录 {}", path.display()))?;
+        .ok_or_else(|| format!("无法解析 {purpose} 存储目录 {}", path.display()))?;
     fs::create_dir_all(parent)
-        .map_err(|error| format!("创建 API Key 存储目录失败 {}: {error}", parent.display()))?;
+        .map_err(|error| format!("创建 {purpose} 存储目录失败 {}: {error}", parent.display()))?;
 
     let temp_path = parent.join(format!(
         ".{}.tmp-{}",
@@ -3615,13 +4342,22 @@ fn write_private_file_atomically(path: &Path, contents: &[u8]) -> Result<(), Str
             .write(true)
             .open(&temp_path)
             .map_err(|error| {
-                format!("创建 API Key 临时文件失败 {}: {error}", temp_path.display())
+                format!(
+                    "创建 {purpose} 临时文件失败 {}: {error}",
+                    temp_path.display()
+                )
             })?;
         temp_file.write_all(contents).map_err(|error| {
-            format!("写入 API Key 临时文件失败 {}: {error}", temp_path.display())
+            format!(
+                "写入 {purpose} 临时文件失败 {}: {error}",
+                temp_path.display()
+            )
         })?;
         temp_file.sync_all().map_err(|error| {
-            format!("刷新 API Key 临时文件失败 {}: {error}", temp_path.display())
+            format!(
+                "刷新 {purpose} 临时文件失败 {}: {error}",
+                temp_path.display()
+            )
         })?;
         drop(temp_file);
         set_private_permissions(&temp_path);
@@ -3630,17 +4366,17 @@ fn write_private_file_atomically(path: &Path, contents: &[u8]) -> Result<(), Str
         {
             fs::rename(&temp_path, path).map_err(|error| {
                 format!(
-                    "替换 API Key 存储文件失败 {} -> {}: {error}",
+                    "替换 {purpose} 存储文件失败 {} -> {}: {error}",
                     temp_path.display(),
                     path.display()
                 )
             })?;
 
             let parent_dir = fs::File::open(parent).map_err(|error| {
-                format!("打开 API Key 存储目录失败 {}: {error}", parent.display())
+                format!("打开 {purpose} 存储目录失败 {}: {error}", parent.display())
             })?;
             parent_dir.sync_all().map_err(|error| {
-                format!("刷新 API Key 存储目录失败 {}: {error}", parent.display())
+                format!("刷新 {purpose} 存储目录失败 {}: {error}", parent.display())
             })?;
         }
 
@@ -3648,12 +4384,12 @@ fn write_private_file_atomically(path: &Path, contents: &[u8]) -> Result<(), Str
         {
             if path.exists() {
                 fs::remove_file(path).map_err(|error| {
-                    format!("移除旧 API Key 存储文件失败 {}: {error}", path.display())
+                    format!("移除旧 {purpose} 存储文件失败 {}: {error}", path.display())
                 })?;
             }
             fs::rename(&temp_path, path).map_err(|error| {
                 format!(
-                    "替换 API Key 存储文件失败 {} -> {}: {error}",
+                    "替换 {purpose} 存储文件失败 {} -> {}: {error}",
                     temp_path.display(),
                     path.display()
                 )
@@ -3711,6 +4447,8 @@ fn build_json_proxy_response(
 fn build_passthrough_sse_response(
     upstream: CodexUpstreamResponse,
     trace: ResponsesTrace,
+    usage_storage: ProxyStorageContext,
+    usage_metadata: ApiProxyUsageMetadata,
 ) -> Response<Body> {
     let (upstream_headers, mut upstream_stream) = upstream.into_stream();
     trace.log("downstream_stream_start", "");
@@ -3720,6 +4458,7 @@ fn build_passthrough_sse_response(
         let mut chunk_count: u64 = 0;
         let mut event_count: u64 = 0;
         let mut upstream_bytes: usize = 0;
+        let mut recorded_usage = false;
 
         while let Some(chunk) = upstream_stream.next().await {
             match chunk {
@@ -3737,6 +4476,12 @@ fn build_passthrough_sse_response(
                     for event in decoder.push(&chunk) {
                         event_count += 1;
                         trace.observe_sse_data(&event.data);
+                        maybe_record_stream_usage_tokens(
+                            &usage_storage,
+                            &usage_metadata,
+                            &event,
+                            &mut recorded_usage,
+                        );
                         yield Ok::<Bytes, Infallible>(serialize_sse_event(
                             event.event.as_deref(),
                             &rewrite_sse_event_data_models_for_client(&event.data),
@@ -3757,6 +4502,12 @@ fn build_passthrough_sse_response(
         for event in decoder.finish() {
             event_count += 1;
             trace.observe_sse_data(&event.data);
+            maybe_record_stream_usage_tokens(
+                &usage_storage,
+                &usage_metadata,
+                &event,
+                &mut recorded_usage,
+            );
             yield Ok::<Bytes, Infallible>(serialize_sse_event(
                 event.event.as_deref(),
                 &rewrite_sse_event_data_models_for_client(&event.data),
@@ -3784,16 +4535,27 @@ fn build_passthrough_sse_response(
         .unwrap_or_else(|_| json_error_response(StatusCode::BAD_GATEWAY, "构建流式代理响应失败"))
 }
 
-fn build_chat_streaming_response(upstream: CodexUpstreamResponse) -> Response<Body> {
+fn build_chat_streaming_response(
+    upstream: CodexUpstreamResponse,
+    usage_storage: ProxyStorageContext,
+    usage_metadata: ApiProxyUsageMetadata,
+) -> Response<Body> {
     let (upstream_headers, mut upstream_stream) = upstream.into_stream();
     let output = stream! {
         let mut decoder = SseDecoder::default();
         let mut state = ChatStreamState::default();
+        let mut recorded_usage = false;
 
         while let Some(chunk) = upstream_stream.next().await {
             match chunk {
                 Ok(chunk) => {
                     for event in decoder.push(&chunk) {
+                        maybe_record_stream_usage_tokens(
+                            &usage_storage,
+                            &usage_metadata,
+                            &event,
+                            &mut recorded_usage,
+                        );
                         for value in translate_sse_event_to_chat_chunk(&event, &mut state) {
                             yield Ok::<Bytes, Infallible>(sse_data_chunk(&value));
                         }
@@ -3812,6 +4574,12 @@ fn build_chat_streaming_response(upstream: CodexUpstreamResponse) -> Response<Bo
         }
 
         for event in decoder.finish() {
+            maybe_record_stream_usage_tokens(
+                &usage_storage,
+                &usage_metadata,
+                &event,
+                &mut recorded_usage,
+            );
             for value in translate_sse_event_to_chat_chunk(&event, &mut state) {
                 yield Ok::<Bytes, Infallible>(sse_data_chunk(&value));
             }
@@ -3834,16 +4602,27 @@ fn build_chat_streaming_response(upstream: CodexUpstreamResponse) -> Response<Bo
         .unwrap_or_else(|_| json_error_response(StatusCode::BAD_GATEWAY, "构建聊天流式响应失败"))
 }
 
-fn build_image_streaming_response(upstream: CodexUpstreamResponse) -> Response<Body> {
+fn build_image_streaming_response(
+    upstream: CodexUpstreamResponse,
+    usage_storage: ProxyStorageContext,
+    usage_metadata: ApiProxyUsageMetadata,
+) -> Response<Body> {
     let (upstream_headers, mut upstream_stream) = upstream.into_stream();
     let output = stream! {
         let mut decoder = SseDecoder::default();
         let mut emitted_final_image = false;
+        let mut recorded_usage = false;
 
         while let Some(chunk) = upstream_stream.next().await {
             match chunk {
                 Ok(chunk) => {
                     for event in decoder.push(&chunk) {
+                        maybe_record_stream_usage_tokens(
+                            &usage_storage,
+                            &usage_metadata,
+                            &event,
+                            &mut recorded_usage,
+                        );
                         for value in translate_sse_event_to_image_chunk(&event, &mut emitted_final_image) {
                             yield Ok::<Bytes, Infallible>(sse_data_chunk(&value));
                         }
@@ -3862,6 +4641,12 @@ fn build_image_streaming_response(upstream: CodexUpstreamResponse) -> Response<B
         }
 
         for event in decoder.finish() {
+            maybe_record_stream_usage_tokens(
+                &usage_storage,
+                &usage_metadata,
+                &event,
+                &mut recorded_usage,
+            );
             for value in translate_sse_event_to_image_chunk(&event, &mut emitted_final_image) {
                 yield Ok::<Bytes, Infallible>(sse_data_chunk(&value));
             }
@@ -4608,10 +5393,47 @@ fn json_error_response(status: StatusCode, message: &str) -> Response<Body> {
 }
 
 async fn update_proxy_target(context: &ProxyContext, candidate: &ProxyCandidate) {
-    let mut snapshot = context.shared.lock().await;
-    snapshot.active_account_key = Some(candidate.account_key.clone());
-    snapshot.active_account_id = Some(candidate.account_id.clone());
-    snapshot.active_account_label = Some(candidate.label.clone());
+    {
+        let mut snapshot = context.shared.lock().await;
+        snapshot.active_account_key = Some(candidate.account_key.clone());
+        snapshot.active_account_id = Some(candidate.account_id.clone());
+        snapshot.active_account_label = Some(candidate.label.clone());
+        snapshot.sequential_account_key = Some(candidate.account_key.clone());
+    }
+
+    if let Err(error) =
+        persist_sequential_proxy_account_key_if_enabled(&context.storage, &candidate.account_key)
+            .await
+    {
+        log::warn!("持久化 API 反代逐个模式账号失败: {error}");
+    }
+}
+
+async fn persist_sequential_proxy_account_key_if_enabled(
+    storage: &ProxyStorageContext,
+    account_key: &str,
+) -> Result<(), String> {
+    let _guard = storage.store_lock.lock().await;
+    let path = account_store_path_from_data_dir(&storage.data_dir);
+    let mut store = load_store_from_path(&path)?;
+
+    if !matches!(
+        store.settings.api_proxy_load_balance_mode,
+        ApiProxyLoadBalanceMode::Sequential
+    ) {
+        return Ok(());
+    }
+
+    if store.settings.api_proxy_sequential_account_key.as_deref() == Some(account_key) {
+        return Ok(());
+    }
+
+    store.settings.api_proxy_sequential_account_key = Some(account_key.to_string());
+    save_store_to_path(&path, &store)
+}
+
+async fn current_sequential_proxy_account_key(context: &ProxyContext) -> Option<String> {
+    context.shared.lock().await.sequential_account_key.clone()
 }
 
 async fn update_proxy_error(context: &ProxyContext, error: Option<String>) {
@@ -4746,6 +5568,9 @@ fn parse_proxy_request_body_limit_mib(value: Option<&str>) -> Option<usize> {
 
 #[cfg(test)]
 mod tests {
+    use super::api_proxy_usage_bucket_seconds;
+    use super::api_proxy_usage_store_has_legacy_private_fields;
+    use super::build_api_proxy_usage_stats;
     use super::build_models_response;
     use super::compare_proxy_candidates;
     use super::convert_completed_response_to_chat_completion;
@@ -4759,20 +5584,29 @@ mod tests {
     use super::is_responses_terminal_event;
     use super::normalize_openai_responses_request;
     use super::normalize_responses_websocket_create;
+    use super::now_unix_seconds;
+    use super::order_proxy_candidates_for_request;
     use super::parse_http_proxy_config;
     use super::parse_proxy_request_body_limit_mib;
+    use super::prune_api_proxy_usage_events;
     use super::resolve_proxy_request_body_limit_bytes_from_mib_value;
     use super::rewrite_response_models_for_client;
     use super::rewrite_sse_event_data_models_for_client;
+    use super::sequential_account_key_for_request;
     use super::should_use_responses_websocket;
     use super::translate_sse_event_to_chat_chunk;
     use super::translate_sse_event_to_image_chunk;
     use super::websocket_target_host_port;
+    use super::ApiProxyUsageEvent;
     use super::ChatStreamState;
     use super::ImageMultipartRequest;
     use super::ProxyCandidate;
+    use super::ProxyLoadBalanceConfig;
     use super::SseEvent;
+    use super::API_PROXY_USAGE_RANGE_1H_SECONDS;
+    use super::API_PROXY_USAGE_RETENTION_SECONDS;
     use super::DEFAULT_PROXY_REQUEST_BODY_LIMIT_BYTES;
+    use crate::models::ApiProxyLoadBalanceMode;
     use crate::models::AppSettings;
     use crate::models::UsageSnapshot;
     use crate::models::UsageWindow;
@@ -4794,34 +5628,95 @@ mod tests {
     }
 
     fn candidate(label: &str, plan_type: &str, used_percent: f64, blocked: bool) -> ProxyCandidate {
+        proxy_candidate_with_plan(
+            label,
+            label,
+            Some(used_percent),
+            Some(used_percent),
+            blocked,
+            plan_type,
+        )
+    }
+
+    fn proxy_candidate(
+        label: &str,
+        account_key: &str,
+        one_week_percent: Option<f64>,
+        five_hour_percent: Option<f64>,
+        auth_refresh_blocked: bool,
+    ) -> ProxyCandidate {
+        proxy_candidate_with_plan(
+            label,
+            account_key,
+            one_week_percent,
+            five_hour_percent,
+            auth_refresh_blocked,
+            "team",
+        )
+    }
+
+    fn proxy_candidate_with_plan(
+        label: &str,
+        account_key: &str,
+        one_week_percent: Option<f64>,
+        five_hour_percent: Option<f64>,
+        auth_refresh_blocked: bool,
+        plan_type: &str,
+    ) -> ProxyCandidate {
         ProxyCandidate {
-            id: label.to_string(),
+            id: account_key.to_string(),
             label: label.to_string(),
             enabled: true,
-            account_key: label.to_string(),
-            account_id: label.to_string(),
+            account_key: account_key.to_string(),
+            account_id: account_key.to_string(),
             access_token: "token".to_string(),
-            auth_json: json!({ "kind": label }),
-            variant_key: label.to_string(),
+            auth_json: json!({ "kind": account_key }),
+            variant_key: account_key.to_string(),
             plan_type: Some(plan_type.to_string()),
             usage: Some(UsageSnapshot {
                 fetched_at: 1,
                 plan_type: Some(plan_type.to_string()),
-                five_hour: Some(UsageWindow {
+                five_hour: five_hour_percent.map(|used_percent| UsageWindow {
                     used_percent,
                     window_seconds: 18_000,
                     reset_at: None,
                 }),
-                one_week: Some(UsageWindow {
+                one_week: one_week_percent.map(|used_percent| UsageWindow {
                     used_percent,
                     window_seconds: 604_800,
                     reset_at: None,
                 }),
                 credits: None,
             }),
-            auth_refresh_blocked: blocked,
+            auth_refresh_blocked,
             auth_refresh_error: None,
             updated_at: 1,
+        }
+    }
+
+    fn load_balance_config(
+        mode: ApiProxyLoadBalanceMode,
+        sequential_limit: f64,
+    ) -> ProxyLoadBalanceConfig {
+        ProxyLoadBalanceConfig {
+            mode,
+            sequential_five_hour_limit_percent: sequential_limit,
+        }
+    }
+
+    fn candidate_labels(candidates: &[ProxyCandidate]) -> Vec<&str> {
+        candidates
+            .iter()
+            .map(|candidate| candidate.label.as_str())
+            .collect()
+    }
+
+    fn usage_event(timestamp: i64, model: &str, calls: i64, tokens: i64) -> ApiProxyUsageEvent {
+        ApiProxyUsageEvent {
+            timestamp,
+            model: model.to_string(),
+            calls,
+            tokens,
         }
     }
 
@@ -4845,33 +5740,117 @@ mod tests {
         let response = build_models_response(None);
         let model = model_by_id(&response, "gpt-5.5");
 
-        assert_eq!(
-            model.get("context_window").and_then(|value| value.as_u64()),
-            Some(1_050_000)
+        assert_eq!(model.get("context_window").and_then(|value| value.as_u64()), Some(1_050_000));
+        assert_eq!(model.get("model_context_window").and_then(|value| value.as_u64()), Some(1_050_000));
+        assert_eq!(model.get("max_output_tokens").and_then(|value| value.as_u64()), Some(128_000));
+        assert_eq!(model.get("effective_context_window_percent").and_then(|value| value.as_u64()), Some(100));
+        assert_eq!(model.get("auto_compact_token_limit").and_then(|value| value.as_u64()), Some(650_000));
+    }
+
+    #[test]
+    fn api_proxy_usage_stats_bucket_calls_and_tokens_per_model() {
+        let now = 3_600;
+        let bucket_seconds = api_proxy_usage_bucket_seconds(API_PROXY_USAGE_RANGE_1H_SECONDS);
+        let call_bucket = now - 120;
+        let token_bucket = now - 60;
+        let events = vec![
+            usage_event(call_bucket, "gpt-5", 1, 0),
+            usage_event(token_bucket, "gpt-5", 0, 42),
+            usage_event(now - API_PROXY_USAGE_RANGE_1H_SECONDS - 1, "gpt-5", 1, 99),
+            usage_event(now - 30, "gpt-5.5", 1, 12),
+        ];
+
+        let stats = build_api_proxy_usage_stats(&events, now, API_PROXY_USAGE_RANGE_1H_SECONDS);
+
+        assert_eq!(stats.range_seconds, API_PROXY_USAGE_RANGE_1H_SECONDS);
+        assert_eq!(stats.bucket_seconds, bucket_seconds);
+        assert_eq!(stats.series.len(), 2);
+
+        let gpt5 = stats
+            .series
+            .iter()
+            .find(|series| series.model == "gpt-5")
+            .expect("gpt-5 series");
+        assert_eq!(gpt5.total_calls, 1);
+        assert_eq!(gpt5.total_tokens, 42);
+        assert!(gpt5.points.iter().all(|point| point.timestamp % bucket_seconds == 0));
+        assert_eq!(gpt5.points.iter().find(|point| point.timestamp == call_bucket).map(|point| point.calls), Some(1));
+        assert_eq!(gpt5.points.iter().find(|point| point.timestamp == token_bucket).map(|point| point.tokens), Some(42));
+
+        for series in &stats.series {
+            assert_eq!(series.points.len(), gpt5.points.len());
+        }
+    }
+
+    #[test]
+    fn api_proxy_usage_pruning_removes_events_older_than_retention() {
+        let now = 10_000_000;
+        let cutoff = now - API_PROXY_USAGE_RETENTION_SECONDS;
+        let mut events = vec![
+            usage_event(cutoff - 1, "gpt-5", 1, 0),
+            usage_event(cutoff, "gpt-5", 1, 0),
+            usage_event(now, "gpt-5.5", 0, 20),
+        ];
+
+        let changed = prune_api_proxy_usage_events(&mut events, now);
+
+        assert!(changed);
+        assert_eq!(events.len(), 2);
+        assert!(events.iter().all(|event| event.timestamp >= cutoff));
+    }
+
+    #[test]
+    fn api_proxy_usage_store_detects_legacy_private_fields() {
+        let mut path = std::env::temp_dir();
+        path.push(format!(
+            "codex-tools-usage-legacy-{}-{}.json",
+            std::process::id(),
+            now_unix_seconds()
+        ));
+
+        std::fs::write(
+            &path,
+            r#"{"version":1,"events":[{"accountKey":"a","accountId":"b","accountLabel":"c","route":"/v1/responses"}]}"#,
+        )
+        .expect("write legacy usage store");
+
+        assert!(api_proxy_usage_store_has_legacy_private_fields(&path));
+
+        std::fs::write(
+            &path,
+            r#"{"version":1,"events":[{"timestamp":1,"model":"gpt-5","calls":1,"tokens":0}]}"#,
+        )
+        .expect("write sanitized usage store");
+
+        assert!(!api_proxy_usage_store_has_legacy_private_fields(&path));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn average_load_balance_preserves_free_plan_then_usage_order() {
+        let candidates = vec![
+            proxy_candidate_with_plan("free weekly 95", "e", Some(95.0), Some(95.0), false, "free"),
+            proxy_candidate("weekly 20", "a", Some(20.0), Some(5.0), false),
+            proxy_candidate("weekly 10 five 90", "b", Some(10.0), Some(90.0), false),
+            proxy_candidate("weekly 10 five 5", "c", Some(10.0), Some(5.0), false),
+            proxy_candidate("blocked low usage", "d", Some(0.0), Some(0.0), true),
+        ];
+
+        let ordered = order_proxy_candidates_for_request(
+            candidates,
+            load_balance_config(ApiProxyLoadBalanceMode::Average, 80.0),
+            None,
         );
+
         assert_eq!(
-            model
-                .get("model_context_window")
-                .and_then(|value| value.as_u64()),
-            Some(1_050_000)
-        );
-        assert_eq!(
-            model
-                .get("max_output_tokens")
-                .and_then(|value| value.as_u64()),
-            Some(128_000)
-        );
-        assert_eq!(
-            model
-                .get("effective_context_window_percent")
-                .and_then(|value| value.as_u64()),
-            Some(100)
-        );
-        assert_eq!(
-            model
-                .get("auto_compact_token_limit")
-                .and_then(|value| value.as_u64()),
-            Some(650_000)
+            candidate_labels(&ordered),
+            vec![
+                "free weekly 95",
+                "weekly 10 five 5",
+                "weekly 10 five 90",
+                "weekly 20",
+                "blocked low usage",
+            ]
         );
     }
 
@@ -4883,22 +5862,42 @@ mod tests {
         }));
         let model = model_by_id(&response, "gpt-5.5");
 
-        assert_eq!(
-            model.get("context_window").and_then(|value| value.as_u64()),
-            Some(258_400)
+        assert_eq!(model.get("context_window").and_then(|value| value.as_u64()), Some(258_400));
+        assert_eq!(model.get("model_context_window").and_then(|value| value.as_u64()), Some(258_400));
+        assert_eq!(model.get("auto_compact_token_limit").and_then(|value| value.as_u64()), Some(258_400));
+    }
+
+    #[test]
+    fn sequential_load_balance_reuses_current_candidate_under_limit() {
+        let candidates = vec![
+            proxy_candidate("smart best", "a", Some(5.0), Some(10.0), false),
+            proxy_candidate("current", "b", Some(50.0), Some(70.0), false),
+        ];
+
+        let ordered = order_proxy_candidates_for_request(
+            candidates,
+            load_balance_config(ApiProxyLoadBalanceMode::Sequential, 80.0),
+            Some("b"),
         );
-        assert_eq!(
-            model
-                .get("model_context_window")
-                .and_then(|value| value.as_u64()),
-            Some(258_400)
+
+        assert_eq!(candidate_labels(&ordered), vec!["current", "smart best"]);
+    }
+
+    #[test]
+    fn sequential_load_balance_reuses_persisted_candidate_after_restart() {
+        let candidates = vec![
+            proxy_candidate("smart best", "a", Some(5.0), Some(10.0), false),
+            proxy_candidate("persisted current", "b", Some(50.0), Some(70.0), false),
+        ];
+        let current_key = sequential_account_key_for_request(None, Some("b".to_string()));
+
+        let ordered = order_proxy_candidates_for_request(
+            candidates,
+            load_balance_config(ApiProxyLoadBalanceMode::Sequential, 80.0),
+            current_key.as_deref(),
         );
-        assert_eq!(
-            model
-                .get("auto_compact_token_limit")
-                .and_then(|value| value.as_u64()),
-            Some(258_400)
-        );
+
+        assert_eq!(candidate_labels(&ordered), vec!["persisted current", "smart best"]);
     }
 
     #[test]
@@ -4909,12 +5908,33 @@ mod tests {
         }));
         let model = model_by_id(&response, "gpt-5.5");
 
-        assert_eq!(
-            model
-                .get("auto_compact_token_limit")
-                .and_then(|value| value.as_u64()),
-            Some(500_000)
+        assert_eq!(model.get("auto_compact_token_limit").and_then(|value| value.as_u64()), Some(500_000));
+    }
+
+    #[test]
+    fn sequential_load_balance_runtime_candidate_overrides_persisted_candidate() {
+        let current_key = sequential_account_key_for_request(
+            Some("runtime".to_string()),
+            Some("persisted".to_string()),
         );
+
+        assert_eq!(current_key.as_deref(), Some("runtime"));
+    }
+
+    #[test]
+    fn sequential_load_balance_reuses_current_candidate_with_missing_five_hour_usage() {
+        let candidates = vec![
+            proxy_candidate("smart best", "a", Some(5.0), Some(10.0), false),
+            proxy_candidate("current missing 5h", "b", Some(50.0), None, false),
+        ];
+
+        let ordered = order_proxy_candidates_for_request(
+            candidates,
+            load_balance_config(ApiProxyLoadBalanceMode::Sequential, 80.0),
+            Some("b"),
+        );
+
+        assert_eq!(candidate_labels(&ordered), vec!["current missing 5h", "smart best"]);
     }
 
     #[test]
@@ -4936,22 +5956,43 @@ mod tests {
             })
             .expect("gpt-5.5 catalog model should be present");
 
-        assert_eq!(
-            model.get("context_window").and_then(|value| value.as_u64()),
-            Some(1_050_000)
+        assert_eq!(model.get("context_window").and_then(|value| value.as_u64()), Some(1_050_000));
+        assert_eq!(model.get("max_context_window").and_then(|value| value.as_u64()), Some(1_050_000));
+        assert_eq!(model.get("auto_compact_token_limit").and_then(|value| value.as_u64()), Some(650_000));
+    }
+
+    #[test]
+    fn sequential_load_balance_keeps_current_first_when_all_five_hour_usage_is_missing() {
+        let candidates = vec![
+            proxy_candidate("missing a", "a", Some(5.0), None, false),
+            proxy_candidate("current missing", "b", Some(50.0), None, false),
+            proxy_candidate("missing c", "c", Some(10.0), None, false),
+        ];
+
+        let ordered = order_proxy_candidates_for_request(
+            candidates,
+            load_balance_config(ApiProxyLoadBalanceMode::Sequential, 80.0),
+            Some("b"),
         );
-        assert_eq!(
-            model
-                .get("max_context_window")
-                .and_then(|value| value.as_u64()),
-            Some(1_050_000)
+
+        assert_eq!(candidate_labels(&ordered)[0], "current missing");
+    }
+
+    #[test]
+    fn sequential_load_balance_switches_when_current_reaches_limit() {
+        let candidates = vec![
+            proxy_candidate("current at limit", "a", Some(1.0), Some(80.0), false),
+            proxy_candidate("next under limit", "b", Some(20.0), Some(10.0), false),
+            proxy_candidate("blocked", "c", Some(0.0), Some(0.0), true),
+        ];
+
+        let ordered = order_proxy_candidates_for_request(
+            candidates,
+            load_balance_config(ApiProxyLoadBalanceMode::Sequential, 80.0),
+            Some("a"),
         );
-        assert_eq!(
-            model
-                .get("auto_compact_token_limit")
-                .and_then(|value| value.as_u64()),
-            Some(650_000)
-        );
+
+        assert_eq!(candidate_labels(&ordered), vec!["next under limit", "current at limit", "blocked"]);
     }
 
     #[test]
@@ -4962,16 +6003,8 @@ mod tests {
         }));
         let model = model_by_id(&response, "gpt-5.5");
 
-        assert_eq!(
-            model.get("context_window").and_then(|value| value.as_u64()),
-            Some(1_050_000)
-        );
-        assert_eq!(
-            model
-                .get("model_context_window")
-                .and_then(|value| value.as_u64()),
-            Some(1_050_000)
-        );
+        assert_eq!(model.get("context_window").and_then(|value| value.as_u64()), Some(1_050_000));
+        assert_eq!(model.get("model_context_window").and_then(|value| value.as_u64()), Some(1_050_000));
     }
 
     #[test]
