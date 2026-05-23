@@ -3465,13 +3465,32 @@ async fn send_codex_request_over_candidates(
         current_sequential_proxy_account_key(context).await,
         selection.persisted_sequential_account_key,
     );
+    let now = now_unix_seconds();
+    let stick_to_current_candidate = should_stick_to_current_sequential_candidate(
+        &selection.candidates,
+        selection.load_balance,
+        current_sequential_account_key.as_deref(),
+        now,
+    );
     let candidates = order_proxy_candidates_for_request(
         selection.candidates,
         selection.load_balance,
         current_sequential_account_key.as_deref(),
     );
-    let candidates =
-        filter_proxy_candidates_for_usage(candidates, now_unix_seconds(), responses_trace);
+    let mut candidates = filter_proxy_candidates_for_usage(candidates, now, responses_trace);
+    if stick_to_current_candidate {
+        if let Some(current_key) = current_sequential_account_key.as_deref() {
+            candidates.retain(|candidate| candidate.account_key == current_key);
+            if let Some(candidate) = candidates.first() {
+                if let Some(trace) = responses_trace {
+                    trace.log(
+                        "sequential_sticky_current",
+                        safe_candidate_label(&candidate.label),
+                    );
+                }
+            }
+        }
+    }
     if candidates.is_empty() {
         let message =
             "全部代理账号 5 小时用量已耗尽或暂不可用，等待用量刷新/重置后再放出。".to_string();
@@ -4054,6 +4073,31 @@ fn sequential_account_key_for_request(
     persisted_account_key: Option<String>,
 ) -> Option<String> {
     runtime_account_key.or(persisted_account_key)
+}
+
+fn should_stick_to_current_sequential_candidate(
+    candidates: &[ProxyCandidate],
+    load_balance: ProxyLoadBalanceConfig,
+    current_sequential_account_key: Option<&str>,
+    now: i64,
+) -> bool {
+    if !matches!(load_balance.mode, ApiProxyLoadBalanceMode::Sequential) {
+        return false;
+    }
+
+    let Some(current_key) = current_sequential_account_key else {
+        return false;
+    };
+
+    candidates
+        .iter()
+        .find(|candidate| candidate.account_key == current_key)
+        .is_some_and(|candidate| {
+            can_reuse_sequential_candidate(
+                candidate,
+                load_balance.sequential_five_hour_limit_percent,
+            ) && five_hour_usage_exhausted_reason(candidate, now).is_none()
+        })
 }
 
 fn can_reuse_sequential_candidate(candidate: &ProxyCandidate, limit_percent: f64) -> bool {
@@ -6568,6 +6612,7 @@ mod tests {
     use super::safe_candidate_label;
     use super::sequential_account_key_for_request;
     use super::service_tier_for_trace;
+    use super::should_stick_to_current_sequential_candidate;
     use super::should_use_responses_websocket;
     use super::should_use_responses_websocket_with_experiment;
     use super::sse_terminal_outcome;
@@ -7087,6 +7132,51 @@ mod tests {
             candidate_labels(&ordered),
             vec!["persisted current", "smart best"]
         );
+    }
+
+    #[test]
+    fn sequential_load_balance_sticks_to_reusable_current_candidate() {
+        let candidates = vec![
+            proxy_candidate("smart best", "a", Some(5.0), Some(10.0), false),
+            proxy_candidate("current", "b", Some(50.0), Some(70.0), false),
+        ];
+
+        assert!(should_stick_to_current_sequential_candidate(
+            &candidates,
+            load_balance_config(ApiProxyLoadBalanceMode::Sequential, 80.0),
+            Some("b"),
+            1,
+        ));
+    }
+
+    #[test]
+    fn sequential_load_balance_does_not_stick_to_current_at_limit() {
+        let candidates = vec![
+            proxy_candidate("current at limit", "a", Some(1.0), Some(80.0), false),
+            proxy_candidate("next under limit", "b", Some(20.0), Some(10.0), false),
+        ];
+
+        assert!(!should_stick_to_current_sequential_candidate(
+            &candidates,
+            load_balance_config(ApiProxyLoadBalanceMode::Sequential, 80.0),
+            Some("a"),
+            1,
+        ));
+    }
+
+    #[test]
+    fn sequential_load_balance_does_not_stick_to_exhausted_current_candidate() {
+        let candidates = vec![
+            proxy_candidate("current exhausted", "a", Some(1.0), Some(100.0), false),
+            proxy_candidate("next under limit", "b", Some(20.0), Some(10.0), false),
+        ];
+
+        assert!(!should_stick_to_current_sequential_candidate(
+            &candidates,
+            load_balance_config(ApiProxyLoadBalanceMode::Sequential, 100.0),
+            Some("a"),
+            1,
+        ));
     }
 
     #[test]
