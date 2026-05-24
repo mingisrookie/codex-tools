@@ -38,6 +38,7 @@ pub fn run_cli_from_env() -> Result<(), String> {
 
 pub async fn run_proxy_daemon(options: ProxyDaemonOptions) -> Result<(), String> {
     let store_lock = Arc::new(Mutex::new(()));
+    let api_proxy_usage_lock = Arc::new(Mutex::new(()));
     let auth_refresh_lock = Arc::new(Mutex::new(()));
     let runtime_slot = Mutex::<Option<ApiProxyRuntimeHandle>>::new(None);
 
@@ -49,6 +50,7 @@ pub async fn run_proxy_daemon(options: ProxyDaemonOptions) -> Result<(), String>
     let storage = new_proxy_storage_context(
         options.data_dir.clone(),
         store_lock,
+        api_proxy_usage_lock,
         auth_refresh_lock,
         false,
     );

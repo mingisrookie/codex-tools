@@ -8,8 +8,18 @@
 
 仓库地址：<https://github.com/170-carry/codex-tools>
 
+当前版本：`v1.9.0`
+
 ## 更新日志
 [更新日志](changelog.md)
+
+### v1.9.0 重点更新
+
+- 修复 Codex Tools 通过本地 `/v1/responses` 转发时比账号 CLI 慢的问题，减少指定账号请求中的本地写入延迟
+- 账号候选池增加缓存，并严格尊重 `ChatGPT-Account-Id`，避免指定账号请求回退到其它账号
+- 顺序模式下当前账号仍优先，但传输失败或 cooldown 后会继续尝试其它健康账号，避免有额度时误报“全部账号耗尽”
+- `send_failed` cooldown 收敛到 30 秒，并对 `error sending request for url` 做一次快速重试
+- 上游 HTTP 客户端切换到 rustls TLS 栈，并补充 900k fast/xhigh 对比 benchmark 脚本
 
 ## Cursor API反代功能提示
 1. 通过 Cursor 官网 下载并安装 Cursor。
@@ -98,6 +108,8 @@ npm run tauri dev
 - 使用已登录的 Codex 账号作为上游能力来源
 - 支持固定端口、自定义端口、固定 API Key 和手动刷新 API Key
 - 按账号余量自动挑选可用账号进行转发
+- 支持指定 `ChatGPT-Account-Id` 固定账号转发；未指定账号时会按用量、cooldown 和顺序模式选择健康账号
+- 对上游传输失败会短暂 cooldown 当前账号并继续尝试其它可用账号，减少偶发 `502/503` 对账号池的影响
 - 可设置应用启动时自动启动 API 反代
 - 可作为 CC Switch 的 Codex 自定义 provider 上游，按 `responses` 协议接入
 

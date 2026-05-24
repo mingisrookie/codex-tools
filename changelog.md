@@ -1,10 +1,11 @@
 ## 更新日志
 
 - v1.9.0
-  1. 修复 Codex Tools 直连比账号 CLI 更慢的问题，补上稳定 Session_id 和首包超时策略
-  2. 5 小时用量耗尽时直接跳过账号，等用量刷新/重置后再放出
-  3. 顺序模式下未耗尽的当前账号保持优先，不再因一次成功回退到别的账号
-  4. 同步版本号并补充回归验证
+  1. 修复 Codex Tools 直连比账号 CLI 慢的问题，去掉指定账号请求中的 sequential target 持久化写入延迟
+  2. 增加账号候选池缓存、严格 `ChatGPT-Account-Id` 限定和 5 小时用量过滤，避免反复读取账号文件或回退到错误账号
+  3. 顺序模式改为“当前账号优先，失败后继续尝试其它健康账号”，避免未标记账号请求在当前账号传输失败后误报全部账号耗尽
+  4. 将 `send_failed` cooldown 收敛到 30 秒，并对 `error sending request for url` 增加一次快速重试
+  5. 切换 Codex 上游 HTTP 客户端到 rustls TLS 栈，并补充 900k fast/xhigh 对比 benchmark 脚本和回归测试
 - v1.8.5
   1. 支持通过代理暴露 Codex 账号图片生成能力
   2. 保持最新发布基线下的 Codex 流式兼容性

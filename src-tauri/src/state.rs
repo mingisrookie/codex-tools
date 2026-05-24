@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Child;
 use std::sync::mpsc::Sender;
@@ -18,6 +19,7 @@ pub(crate) struct ApiProxyRuntimeSnapshot {
     pub(crate) active_account_id: Option<String>,
     pub(crate) active_account_label: Option<String>,
     pub(crate) sequential_account_key: Option<String>,
+    pub(crate) candidate_cooldowns: HashMap<String, i64>,
     pub(crate) last_error: Option<String>,
 }
 
@@ -49,12 +51,14 @@ pub(crate) struct OauthCallbackListenerHandle {
 
 /// 全局运行态：
 /// - `store_lock` 保证账号存储读写的串行化。
+/// - `api_proxy_usage_lock` 保证 API 反代统计文件读写的串行化。
 /// - `pending_oauth_login` 维护当前 OAuth 授权会话。
 /// - `oauth_listener` 维护本地 OAuth 回调监听线程。
 /// - `api_proxy` 维护本地 API 反代服务的生命周期与状态。
 /// - `cloudflared` 维护公网隧道进程与当前状态。
 pub(crate) struct AppState {
     pub(crate) store_lock: Arc<Mutex<()>>,
+    pub(crate) api_proxy_usage_lock: Arc<Mutex<()>>,
     pub(crate) auth_refresh_lock: Arc<Mutex<()>>,
     pub(crate) oauth_flow_lock: Arc<Mutex<()>>,
     pub(crate) pending_oauth_login: Mutex<Option<PendingOauthLogin>>,
@@ -67,6 +71,7 @@ impl Default for AppState {
     fn default() -> Self {
         Self {
             store_lock: Arc::new(Mutex::new(())),
+            api_proxy_usage_lock: Arc::new(Mutex::new(())),
             auth_refresh_lock: Arc::new(Mutex::new(())),
             oauth_flow_lock: Arc::new(Mutex::new(())),
             pending_oauth_login: Mutex::new(None),

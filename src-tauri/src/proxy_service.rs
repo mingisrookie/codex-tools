@@ -19,6 +19,7 @@ use std::sync::Arc;
 use std::sync::RwLock;
 use std::time::Duration;
 use std::time::Instant;
+use std::time::SystemTime;
 
 use async_stream::stream;
 use axum::body::to_bytes;
@@ -53,6 +54,8 @@ use serde::Serialize;
 use serde_json::json;
 use serde_json::Map;
 use serde_json::Value;
+use sha2::Digest;
+use sha2::Sha256;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
@@ -161,11 +164,14 @@ const API_PROXY_USAGE_RANGE_7D_SECONDS: i64 = 7 * 24 * 60 * 60;
 const API_PROXY_USAGE_RANGE_14D_SECONDS: i64 = 14 * 24 * 60 * 60;
 const API_PROXY_USAGE_RANGE_30D_SECONDS: i64 = 30 * 24 * 60 * 60;
 const DEFAULT_API_PROXY_USAGE_RANGE_SECONDS: i64 = API_PROXY_USAGE_RANGE_24H_SECONDS;
+const PROXY_CANDIDATE_FAILURE_COOLDOWN_SECS: i64 = 5 * 60;
+const PROXY_CANDIDATE_SEND_FAILED_COOLDOWN_SECS: i64 = 30;
 
 #[derive(Clone)]
 pub(crate) struct ProxyStorageContext {
     pub(crate) data_dir: PathBuf,
     pub(crate) store_lock: Arc<tokio::sync::Mutex<()>>,
+    pub(crate) api_proxy_usage_lock: Arc<tokio::sync::Mutex<()>>,
     pub(crate) auth_refresh_lock: Arc<tokio::sync::Mutex<()>>,
     pub(crate) sync_active_auth_on_refresh: bool,
 }
@@ -187,10 +193,18 @@ struct ProxyCandidate {
     updated_at: i64,
 }
 
+#[derive(Clone)]
 struct ProxyCandidateSelection {
     candidates: Vec<ProxyCandidate>,
     load_balance: ProxyLoadBalanceConfig,
     persisted_sequential_account_key: Option<String>,
+}
+
+#[derive(Clone)]
+struct ProxyCandidateSelectionCache {
+    modified: Option<SystemTime>,
+    len: Option<u64>,
+    selection: ProxyCandidateSelection,
 }
 
 #[derive(Clone, Debug)]
@@ -259,6 +273,7 @@ struct ProxyContext {
     default_session_id: String,
     client: reqwest::Client,
     shared: Arc<tokio::sync::Mutex<ApiProxyRuntimeSnapshot>>,
+    candidate_cache: Arc<tokio::sync::Mutex<Option<ProxyCandidateSelectionCache>>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -659,6 +674,17 @@ fn safe_trace_atom(value: &str) -> String {
     truncate_for_error(trimmed, 80)
 }
 
+fn short_sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    let digest = hasher.finalize();
+    digest
+        .iter()
+        .take(8)
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>()
+}
+
 fn safe_trace_path(value: &str) -> String {
     if value.is_empty() {
         return "/".to_string();
@@ -779,6 +805,18 @@ struct RetryFailureInfo {
     detail: String,
 }
 
+impl RetryFailureInfo {
+    fn cooldown_reason(&self) -> &'static str {
+        match self.category {
+            RetryFailureCategory::QuotaExceeded => "quota_exceeded",
+            RetryFailureCategory::RateLimited => "rate_limited",
+            RetryFailureCategory::ModelRestricted => "model_restricted",
+            RetryFailureCategory::Authentication => "auth_failed",
+            RetryFailureCategory::Permission => "permission_denied",
+        }
+    }
+}
+
 #[derive(Default)]
 struct SseDecoder {
     buffer: Vec<u8>,
@@ -816,12 +854,14 @@ impl Default for ChatStreamState {
 pub(crate) fn new_proxy_storage_context(
     data_dir: PathBuf,
     store_lock: Arc<tokio::sync::Mutex<()>>,
+    api_proxy_usage_lock: Arc<tokio::sync::Mutex<()>>,
     auth_refresh_lock: Arc<tokio::sync::Mutex<()>>,
     sync_active_auth_on_refresh: bool,
 ) -> ProxyStorageContext {
     ProxyStorageContext {
         data_dir,
         store_lock,
+        api_proxy_usage_lock,
         auth_refresh_lock,
         sync_active_auth_on_refresh,
     }
@@ -835,6 +875,7 @@ fn app_proxy_storage_context(
     Ok(new_proxy_storage_context(
         app_data_dir(app)?,
         state.store_lock.clone(),
+        state.api_proxy_usage_lock.clone(),
         state.auth_refresh_lock.clone(),
         true,
     ))
@@ -883,7 +924,7 @@ pub(crate) async fn get_api_proxy_usage_stats_with_storage(
 ) -> Result<ApiProxyUsageStats, String> {
     let now = now_unix_seconds();
     let range_seconds = normalize_api_proxy_usage_range_seconds(range_seconds);
-    let _guard = storage.store_lock.lock().await;
+    let _guard = storage.api_proxy_usage_lock.lock().await;
     let path = api_proxy_usage_path(storage)?;
     let should_scrub_legacy_fields = api_proxy_usage_store_has_legacy_private_fields(&path);
     let mut store = load_api_proxy_usage_store_from_path(&path)?;
@@ -912,7 +953,7 @@ pub(crate) async fn clear_api_proxy_usage_stats_with_storage(
     storage: &ProxyStorageContext,
 ) -> Result<(), String> {
     let now = now_unix_seconds();
-    let _guard = storage.store_lock.lock().await;
+    let _guard = storage.api_proxy_usage_lock.lock().await;
     let path = api_proxy_usage_path(storage)?;
     let store = ApiProxyUsageStore {
         updated_at: now,
@@ -955,8 +996,8 @@ pub(crate) async fn start_api_proxy_with_runtime(
         return Ok(status_from_handle_state(existing_handle).await);
     }
 
-    let available_accounts = load_proxy_candidates(storage).await?;
-    if available_accounts.is_empty() {
+    let initial_selection = load_proxy_candidate_selection(storage).await?;
+    if initial_selection.candidates.is_empty() {
         return Err("暂无可用于代理的账号，请先添加并授权账号。".to_string());
     }
 
@@ -988,6 +1029,9 @@ pub(crate) async fn start_api_proxy_with_runtime(
         .map_err(|error| format!("创建代理 HTTP 客户端失败: {error}"))?;
 
     let shared = Arc::new(tokio::sync::Mutex::new(ApiProxyRuntimeSnapshot::default()));
+    let candidate_cache = Arc::new(tokio::sync::Mutex::new(Some(
+        proxy_candidate_selection_cache_entry(storage, initial_selection),
+    )));
     let context = Arc::new(ProxyContext {
         storage: storage.clone(),
         api_key: shared_api_key.clone(),
@@ -995,6 +1039,7 @@ pub(crate) async fn start_api_proxy_with_runtime(
         default_session_id: uuid::Uuid::new_v4().to_string(),
         client,
         shared: shared.clone(),
+        candidate_cache,
     });
     let request_body_limit = resolve_proxy_request_body_limit_bytes();
 
@@ -1430,7 +1475,8 @@ async fn chat_completions_handler(
     };
 
     let (candidate, upstream_response) = upstream;
-    update_proxy_target(&context, &candidate).await;
+    let persist_sequential_target = should_persist_sequential_target_for_request(&headers);
+    update_proxy_target(&context, &candidate, persist_sequential_target).await;
     update_proxy_error(&context, None).await;
     let usage_metadata =
         api_proxy_usage_metadata(&candidate, "/v1/chat/completions", &upstream_payload);
@@ -1592,7 +1638,17 @@ async fn responses_handler(
             upstream_response.status(),
         ),
     );
-    update_proxy_target(&context, &candidate).await;
+    let persist_sequential_target = should_persist_sequential_target_for_request(&headers);
+    let proxy_target_update_started = Instant::now();
+    update_proxy_target(&context, &candidate, persist_sequential_target).await;
+    trace.log(
+        "proxy_target_updated",
+        format!(
+            "persist_sequential={} elapsed_ms={}",
+            persist_sequential_target,
+            proxy_target_update_started.elapsed().as_millis()
+        ),
+    );
     update_proxy_error(&context, None).await;
     let usage_metadata = api_proxy_usage_metadata(&candidate, "/v1/responses", &upstream_payload);
 
@@ -1781,7 +1837,8 @@ async fn forward_image_request(
     };
 
     let (candidate, upstream_response) = upstream;
-    update_proxy_target(&context, &candidate).await;
+    let persist_sequential_target = should_persist_sequential_target_for_request(&headers);
+    update_proxy_target(&context, &candidate, persist_sequential_target).await;
     update_proxy_error(&context, None).await;
     let usage_metadata = api_proxy_usage_metadata(&candidate, route, &upstream_payload);
 
@@ -1812,7 +1869,7 @@ async fn forward_image_request(
                     Err(response) => return response,
                 };
                 let (candidate, upstream_response) = upstream;
-                update_proxy_target(&context, &candidate).await;
+                update_proxy_target(&context, &candidate, persist_sequential_target).await;
                 update_proxy_error(&context, None).await;
                 (candidate, upstream_response)
             };
@@ -1929,7 +1986,8 @@ async fn handle_responses_websocket(
     };
 
     let (candidate, upstream_response) = upstream;
-    update_proxy_target(&context, &candidate).await;
+    let persist_sequential_target = should_persist_sequential_target_for_request(&headers);
+    update_proxy_target(&context, &candidate, persist_sequential_target).await;
     update_proxy_error(&context, None).await;
     let usage_metadata =
         api_proxy_usage_metadata(&candidate, "/v1/responses websocket", &upstream_payload);
@@ -3448,7 +3506,8 @@ async fn send_codex_request_over_candidates(
     payload: &Value,
     responses_trace: Option<&ResponsesTrace>,
 ) -> Result<(ProxyCandidate, CodexUpstreamResponse), Response<Body>> {
-    let selection = match load_proxy_candidate_selection(&context.storage).await {
+    let selection_started = Instant::now();
+    let selection = match load_proxy_candidate_selection_cached(context).await {
         Ok(selection) if !selection.candidates.is_empty() => selection,
         Ok(_) => {
             return Err(json_error_response(
@@ -3461,35 +3520,69 @@ async fn send_codex_request_over_candidates(
             return Err(json_error_response(StatusCode::BAD_GATEWAY, &error));
         }
     };
+    if let Some(trace) = responses_trace {
+        trace.log(
+            "candidate_selection_loaded",
+            format!(
+                "elapsed_ms={} count={}",
+                selection_started.elapsed().as_millis(),
+                selection.candidates.len()
+            ),
+        );
+    }
     let current_sequential_account_key = sequential_account_key_for_request(
         current_sequential_proxy_account_key(context).await,
         selection.persisted_sequential_account_key,
     );
+    let requested_account_id = requested_chatgpt_account_id_for_request(headers);
     let now = now_unix_seconds();
-    let stick_to_current_candidate = should_stick_to_current_sequential_candidate(
-        &selection.candidates,
-        selection.load_balance,
-        current_sequential_account_key.as_deref(),
-        now,
-    );
+    let stick_to_current_candidate = requested_account_id.is_none()
+        && should_stick_to_current_sequential_candidate(
+            &selection.candidates,
+            selection.load_balance,
+            current_sequential_account_key.as_deref(),
+            now,
+        );
     let candidates = order_proxy_candidates_for_request(
         selection.candidates,
         selection.load_balance,
         current_sequential_account_key.as_deref(),
     );
+    let candidates = restrict_to_requested_chatgpt_account_id(
+        candidates,
+        requested_account_id.as_deref(),
+        responses_trace,
+    );
+    let candidates = filter_proxy_candidates_for_auth_refresh_state(candidates, responses_trace);
     let mut candidates = filter_proxy_candidates_for_usage(candidates, now, responses_trace);
-    if stick_to_current_candidate {
-        if let Some(current_key) = current_sequential_account_key.as_deref() {
-            candidates.retain(|candidate| candidate.account_key == current_key);
-            if let Some(candidate) = candidates.first() {
-                if let Some(trace) = responses_trace {
-                    trace.log(
-                        "sequential_sticky_current",
-                        safe_candidate_label(&candidate.label),
-                    );
-                }
+    candidates =
+        filter_proxy_candidates_for_runtime_cooldown(context, candidates, now, responses_trace)
+            .await;
+    if let Some(trace) = responses_trace {
+        trace.log(
+            "candidate_pool_ready",
+            format!("count={}", candidates.len()),
+        );
+    }
+    match apply_sequential_sticky_current(
+        &mut candidates,
+        stick_to_current_candidate,
+        current_sequential_account_key.as_deref(),
+    ) {
+        SequentialStickyOutcome::StuckToCurrent(label) => {
+            if let Some(trace) = responses_trace {
+                trace.log("sequential_sticky_current", safe_candidate_label(&label));
             }
         }
+        SequentialStickyOutcome::CurrentUnavailable { fallback_count } => {
+            if let Some(trace) = responses_trace {
+                trace.log(
+                    "sequential_sticky_current_unavailable",
+                    format!("fallback_count={fallback_count}"),
+                );
+            }
+        }
+        SequentialStickyOutcome::NotSticky => {}
     }
     if candidates.is_empty() {
         let message =
@@ -3508,6 +3601,7 @@ async fn send_codex_request_over_candidates(
 
     for mut candidate in candidates {
         let mut did_refresh = false;
+        let mut did_retry_send_failed = false;
         let candidate_label = safe_candidate_label(&candidate.label);
         if let Some(model) = priority_model.as_deref() {
             match candidate_supports_priority_service_tier(context, &candidate, model).await {
@@ -3550,12 +3644,31 @@ async fn send_codex_request_over_candidates(
             {
                 Ok(response) => response,
                 Err(error) => {
+                    if !did_retry_send_failed && should_retry_proxy_send_failed_error(&error) {
+                        did_retry_send_failed = true;
+                        if let Some(trace) = responses_trace {
+                            trace.log(
+                                "upstream_send_retry",
+                                format!("{candidate_label}: {}", truncate_for_error(&error, 200)),
+                            );
+                        }
+                        tokio::time::sleep(Duration::from_millis(250)).await;
+                        continue;
+                    }
                     if let Some(trace) = responses_trace {
                         trace.log(
                             "upstream_attempt_failed",
                             format!("{candidate_label}: {}", truncate_for_error(&error, 200)),
                         );
                     }
+                    cooldown_proxy_candidate(
+                        context,
+                        &candidate,
+                        now,
+                        "send_failed",
+                        responses_trace,
+                    )
+                    .await;
                     attempt_errors.push(format!("{candidate_label}: {error}"));
                     break;
                 }
@@ -3564,7 +3677,10 @@ async fn send_codex_request_over_candidates(
             let status = upstream.status();
             log_proxy_response_route(route, status);
             if status.is_success() {
-                record_api_proxy_call_success(context, &candidate, route, payload).await;
+                record_api_proxy_call_success(context, &candidate, route, payload);
+                if let Some(trace) = responses_trace {
+                    trace.log("usage_call_record_queued", "");
+                }
                 return Ok((candidate, upstream));
             }
 
@@ -3579,6 +3695,14 @@ async fn send_codex_request_over_candidates(
 
             if !did_refresh && should_retry_with_token_refresh(status, &upstream_body) {
                 if candidate.auth_refresh_blocked {
+                    cooldown_proxy_candidate(
+                        context,
+                        &candidate,
+                        now,
+                        "auth_refresh_blocked",
+                        responses_trace,
+                    )
+                    .await;
                     attempt_errors.push(format!(
                         "{candidate_label}: {}",
                         candidate
@@ -3595,6 +3719,20 @@ async fn send_codex_request_over_candidates(
                         continue;
                     }
                     Err(error) => {
+                        if let Some(trace) = responses_trace {
+                            trace.log(
+                                "auth_refresh_failed",
+                                format!("{candidate_label}: {}", truncate_for_error(&error, 200)),
+                            );
+                        }
+                        cooldown_proxy_candidate(
+                            context,
+                            &candidate,
+                            now,
+                            "auth_refresh_failed",
+                            responses_trace,
+                        )
+                        .await;
                         attempt_errors.push(format!("{candidate_label}: 刷新登录态失败: {error}"));
                         break;
                     }
@@ -3602,6 +3740,14 @@ async fn send_codex_request_over_candidates(
             }
 
             if let Some(failure) = classify_retriable_failure(status, &upstream_body) {
+                cooldown_proxy_candidate(
+                    context,
+                    &candidate,
+                    now,
+                    failure.cooldown_reason(),
+                    responses_trace,
+                )
+                .await;
                 retriable_failures.push(failure);
                 break;
             }
@@ -3717,7 +3863,7 @@ fn upstream_headers_timeout_for_payload(payload: &Value) -> Duration {
             .and_then(Value::as_str)
             .is_some_and(|effort| effort == "xhigh")
         {
-            Duration::from_secs(20)
+            Duration::from_secs(DEFAULT_PROXY_UPSTREAM_HEADERS_TIMEOUT_SECS)
         } else {
             Duration::from_secs(DEFAULT_PROXY_FAST_UPSTREAM_HEADERS_TIMEOUT_SECS)
         }
@@ -3774,10 +3920,15 @@ async fn forward_codex_request_with_candidate(
     if let Some(trace) = responses_trace {
         trace.log(
             "outbound_payload",
-            format_service_tier_trace_details(
-                payload.get("model").and_then(Value::as_str),
-                &service_tier_for_trace(payload),
-                Some(&upstream_url),
+            format!(
+                "{} bytes={} sha256={}",
+                format_service_tier_trace_details(
+                    payload.get("model").and_then(Value::as_str),
+                    &service_tier_for_trace(payload),
+                    Some(&upstream_url),
+                ),
+                serialized.len(),
+                short_sha256_hex(&serialized),
             ),
         );
     }
@@ -3792,7 +3943,6 @@ async fn forward_codex_request_with_candidate(
         )
         .header("ChatGPT-Account-Id", &candidate.account_id)
         .header("Accept", "text/event-stream")
-        .header("Accept-Encoding", "identity")
         .header("Content-Type", "application/json");
     if use_responses_experimental_beta {
         request = request.header("OpenAI-Beta", RESPONSES_EXPERIMENTAL_BETA);
@@ -3811,6 +3961,12 @@ async fn forward_codex_request_with_candidate(
         &upstream_url,
     )
     .await?;
+    if let Some(trace) = responses_trace {
+        trace.log(
+            "upstream_response_ready",
+            format!("status={}", response.status()),
+        );
+    }
 
     Ok(CodexUpstreamResponse::Http(response))
 }
@@ -3946,12 +4102,49 @@ async fn forward_codex_websocket_request_with_candidate(
     })
 }
 
-async fn load_proxy_candidates(
+fn proxy_candidate_selection_cache_key(
     storage: &ProxyStorageContext,
-) -> Result<Vec<ProxyCandidate>, String> {
-    load_proxy_candidate_selection(storage)
-        .await
-        .map(|selection| selection.candidates)
+) -> (Option<SystemTime>, Option<u64>) {
+    let path = account_store_path_from_data_dir(&storage.data_dir);
+    match fs::metadata(path) {
+        Ok(metadata) => (metadata.modified().ok(), Some(metadata.len())),
+        Err(_) => (None, None),
+    }
+}
+
+fn proxy_candidate_selection_cache_entry(
+    storage: &ProxyStorageContext,
+    selection: ProxyCandidateSelection,
+) -> ProxyCandidateSelectionCache {
+    let (modified, len) = proxy_candidate_selection_cache_key(storage);
+    ProxyCandidateSelectionCache {
+        modified,
+        len,
+        selection,
+    }
+}
+
+async fn load_proxy_candidate_selection_cached(
+    context: &ProxyContext,
+) -> Result<ProxyCandidateSelection, String> {
+    let (modified, len) = proxy_candidate_selection_cache_key(&context.storage);
+    {
+        let cache = context.candidate_cache.lock().await;
+        if let Some(cache) = cache.as_ref() {
+            if cache.modified == modified && cache.len == len {
+                return Ok(cache.selection.clone());
+            }
+        }
+    }
+
+    let selection = load_proxy_candidate_selection(&context.storage).await?;
+    let mut cache = context.candidate_cache.lock().await;
+    *cache = Some(ProxyCandidateSelectionCache {
+        modified,
+        len,
+        selection: selection.clone(),
+    });
+    Ok(selection)
 }
 
 async fn load_proxy_candidate_selection(
@@ -4068,6 +4261,84 @@ fn order_proxy_candidates_for_request(
     candidates
 }
 
+fn requested_chatgpt_account_id_for_request(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get("chatgpt-account-id")
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string)
+}
+
+fn should_persist_sequential_target_for_request(headers: &HeaderMap) -> bool {
+    requested_chatgpt_account_id_for_request(headers).is_none()
+}
+
+fn should_retry_proxy_send_failed_error(error: &str) -> bool {
+    error.contains("error sending request for url")
+}
+
+fn restrict_to_requested_chatgpt_account_id(
+    candidates: Vec<ProxyCandidate>,
+    requested_account_id: Option<&str>,
+    responses_trace: Option<&ResponsesTrace>,
+) -> Vec<ProxyCandidate> {
+    let Some(requested_account_id) = requested_account_id else {
+        return candidates;
+    };
+
+    let mut matched = Vec::new();
+    for candidate in candidates {
+        if candidate.account_id == requested_account_id {
+            if let Some(trace) = responses_trace {
+                trace.log(
+                    "requested_account_selected",
+                    safe_candidate_label(&candidate.label),
+                );
+            }
+            matched.push(candidate);
+        }
+    }
+    if matched.is_empty() {
+        if let Some(trace) = responses_trace {
+            trace.log(
+                "requested_account_missing",
+                format!("account_id={}", safe_trace_atom(requested_account_id)),
+            );
+        }
+    }
+    matched
+}
+
+fn filter_proxy_candidates_for_auth_refresh_state(
+    candidates: Vec<ProxyCandidate>,
+    responses_trace: Option<&ResponsesTrace>,
+) -> Vec<ProxyCandidate> {
+    candidates
+        .into_iter()
+        .filter(|candidate| {
+            if !candidate.auth_refresh_blocked {
+                return true;
+            }
+            if let Some(trace) = responses_trace {
+                let detail = candidate
+                    .auth_refresh_error
+                    .as_deref()
+                    .map(|error| {
+                        format!(
+                            "{} reason={}",
+                            safe_candidate_label(&candidate.label),
+                            truncate_for_error(error, 80)
+                        )
+                    })
+                    .unwrap_or_else(|| safe_candidate_label(&candidate.label).to_string());
+                trace.log("auth_refresh_blocked_skip", detail);
+            }
+            false
+        })
+        .collect()
+}
+
 fn sequential_account_key_for_request(
     runtime_account_key: Option<String>,
     persisted_account_key: Option<String>,
@@ -4098,6 +4369,43 @@ fn should_stick_to_current_sequential_candidate(
                 load_balance.sequential_five_hour_limit_percent,
             ) && five_hour_usage_exhausted_reason(candidate, now).is_none()
         })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum SequentialStickyOutcome {
+    NotSticky,
+    StuckToCurrent(String),
+    CurrentUnavailable { fallback_count: usize },
+}
+
+fn apply_sequential_sticky_current(
+    candidates: &mut Vec<ProxyCandidate>,
+    stick_to_current_candidate: bool,
+    current_sequential_account_key: Option<&str>,
+) -> SequentialStickyOutcome {
+    if !stick_to_current_candidate {
+        return SequentialStickyOutcome::NotSticky;
+    }
+
+    let Some(current_key) = current_sequential_account_key else {
+        return SequentialStickyOutcome::NotSticky;
+    };
+
+    let Some(current_index) = candidates
+        .iter()
+        .position(|candidate| candidate.account_key == current_key)
+    else {
+        return SequentialStickyOutcome::CurrentUnavailable {
+            fallback_count: candidates.len(),
+        };
+    };
+
+    let current_label = candidates[current_index].label.clone();
+    if current_index != 0 {
+        let current = candidates.remove(current_index);
+        candidates.insert(0, current);
+    }
+    SequentialStickyOutcome::StuckToCurrent(current_label)
 }
 
 fn can_reuse_sequential_candidate(candidate: &ProxyCandidate, limit_percent: f64) -> bool {
@@ -4156,6 +4464,70 @@ fn filter_proxy_candidates_for_usage(
             }
         })
         .collect()
+}
+
+async fn filter_proxy_candidates_for_runtime_cooldown(
+    context: &ProxyContext,
+    candidates: Vec<ProxyCandidate>,
+    now: i64,
+    responses_trace: Option<&ResponsesTrace>,
+) -> Vec<ProxyCandidate> {
+    let cooldowns = {
+        let mut shared = context.shared.lock().await;
+        shared.candidate_cooldowns.retain(|_, until| *until > now);
+        shared.candidate_cooldowns.clone()
+    };
+
+    if cooldowns.is_empty() {
+        return candidates;
+    }
+
+    candidates
+        .into_iter()
+        .filter(|candidate| {
+            let Some(until) = cooldowns.get(&candidate.account_key) else {
+                return true;
+            };
+            if let Some(trace) = responses_trace {
+                trace.log(
+                    "candidate_cooldown_skip",
+                    format!("{} until={until}", safe_candidate_label(&candidate.label)),
+                );
+            }
+            false
+        })
+        .collect()
+}
+
+async fn cooldown_proxy_candidate(
+    context: &ProxyContext,
+    candidate: &ProxyCandidate,
+    now: i64,
+    reason: &str,
+    responses_trace: Option<&ResponsesTrace>,
+) {
+    let cooldown_seconds = if reason == "send_failed" {
+        PROXY_CANDIDATE_SEND_FAILED_COOLDOWN_SECS
+    } else {
+        PROXY_CANDIDATE_FAILURE_COOLDOWN_SECS
+    };
+    let until = now.saturating_add(cooldown_seconds);
+    {
+        let mut shared = context.shared.lock().await;
+        shared
+            .candidate_cooldowns
+            .insert(candidate.account_key.clone(), until);
+    }
+    if let Some(trace) = responses_trace {
+        trace.log(
+            "candidate_cooldown_set",
+            format!(
+                "{} reason={} until={until}",
+                safe_candidate_label(&candidate.label),
+                safe_trace_atom(reason),
+            ),
+        );
+    }
 }
 
 fn five_hour_usage_exhausted_reason(candidate: &ProxyCandidate, now: i64) -> Option<String> {
@@ -4328,6 +4700,7 @@ fn should_suspend_proxy_refresh(raw_error: &str) -> bool {
     let normalized = raw_error.to_ascii_lowercase();
     normalized.contains("refresh_token_reused")
         || is_invalid_refresh_grant(&normalized)
+        || is_empty_refresh_token_error(&normalized)
         || normalized.contains("provided authentication token is expired")
         || normalized
             .contains("your refresh token has already been used to generate a new access token")
@@ -4354,6 +4727,7 @@ fn normalize_proxy_refresh_error(raw_error: &str) -> String {
     }
     if normalized.contains("refresh_token_reused")
         || is_invalid_refresh_grant(&normalized)
+        || is_empty_refresh_token_error(&normalized)
         || normalized.contains("provided authentication token is expired")
         || normalized
             .contains("your refresh token has already been used to generate a new access token")
@@ -4371,6 +4745,10 @@ fn normalize_proxy_refresh_error(raw_error: &str) -> String {
         return "授权过期，请重新登录授权。".to_string();
     }
     raw_error.to_string()
+}
+
+fn is_empty_refresh_token_error(normalized_error: &str) -> bool {
+    normalized_error.contains("refresh_token") && normalized_error.contains("empty string")
 }
 
 fn is_invalid_refresh_grant(normalized_error: &str) -> bool {
@@ -4833,21 +5211,28 @@ fn api_proxy_usage_path(storage: &ProxyStorageContext) -> Result<PathBuf, String
     Ok(storage.data_dir.join(API_PROXY_USAGE_FILE_NAME))
 }
 
-async fn record_api_proxy_call_success(
+fn record_api_proxy_call_success(
     context: &ProxyContext,
     candidate: &ProxyCandidate,
     route: &str,
     payload: &Value,
 ) {
     let metadata = api_proxy_usage_metadata(candidate, route, payload);
-    if let Err(error) = append_api_proxy_usage_event(
-        &context.storage,
-        api_proxy_usage_event(&metadata, 1, 0, now_unix_seconds()),
-    )
-    .await
-    {
-        log::warn!("记录 API 反代调用统计失败 route={route}: {error}");
-    }
+    let storage = context.storage.clone();
+    tokio::spawn(async move {
+        if let Err(error) = append_api_proxy_usage_event(
+            &storage,
+            api_proxy_usage_event(&metadata, 1, 0, now_unix_seconds()),
+        )
+        .await
+        {
+            log::warn!(
+                "记录 API 反代调用统计失败 route={}: {}",
+                metadata.route,
+                error
+            );
+        }
+    });
 }
 
 async fn record_api_proxy_tokens_from_response(
@@ -4959,7 +5344,7 @@ async fn append_api_proxy_usage_event(
         event.timestamp = now;
     }
 
-    let _guard = storage.store_lock.lock().await;
+    let _guard = storage.api_proxy_usage_lock.lock().await;
     let path = api_proxy_usage_path(storage)?;
     let mut store = load_api_proxy_usage_store_from_path(&path)?;
     store.events.push(event);
@@ -6400,13 +6785,23 @@ fn json_error_response(status: StatusCode, message: &str) -> Response<Body> {
     response
 }
 
-async fn update_proxy_target(context: &ProxyContext, candidate: &ProxyCandidate) {
+async fn update_proxy_target(
+    context: &ProxyContext,
+    candidate: &ProxyCandidate,
+    persist_sequential_target: bool,
+) {
     {
         let mut snapshot = context.shared.lock().await;
         snapshot.active_account_key = Some(candidate.account_key.clone());
         snapshot.active_account_id = Some(candidate.account_id.clone());
         snapshot.active_account_label = Some(candidate.label.clone());
-        snapshot.sequential_account_key = Some(candidate.account_key.clone());
+        if persist_sequential_target {
+            snapshot.sequential_account_key = Some(candidate.account_key.clone());
+        }
+    }
+
+    if !persist_sequential_target {
+        return;
     }
 
     if let Err(error) =
@@ -6578,6 +6973,7 @@ fn parse_proxy_request_body_limit_mib(value: Option<&str>) -> Option<usize> {
 mod tests {
     use super::api_proxy_usage_bucket_seconds;
     use super::api_proxy_usage_store_has_legacy_private_fields;
+    use super::apply_sequential_sticky_current;
     use super::build_api_proxy_usage_stats;
     use super::build_models_response;
     use super::classify_retriable_failure;
@@ -6590,12 +6986,14 @@ mod tests {
     use super::convert_openai_image_generation_request_to_codex;
     use super::convert_responses_image_output_to_images_response;
     use super::extract_completed_response_from_sse;
+    use super::filter_proxy_candidates_for_auth_refresh_state;
     use super::filter_proxy_candidates_for_usage;
     use super::find_http_header_end;
     use super::format_service_tier_trace_details;
     use super::host_matches_no_proxy;
     use super::is_responses_terminal_event;
     use super::normalize_openai_responses_request;
+    use super::normalize_proxy_refresh_error;
     use super::normalize_responses_websocket_create;
     use super::now_unix_seconds;
     use super::order_proxy_candidates_for_request;
@@ -6607,12 +7005,17 @@ mod tests {
     use super::prune_api_proxy_usage_events;
     use super::resolve_proxy_request_body_limit_bytes_from_mib_value;
     use super::response_service_tier_for_trace;
+    use super::restrict_to_requested_chatgpt_account_id;
     use super::rewrite_response_models_for_client;
     use super::rewrite_sse_event_data_models_for_client;
     use super::safe_candidate_label;
     use super::sequential_account_key_for_request;
     use super::service_tier_for_trace;
+    use super::short_sha256_hex;
+    use super::should_persist_sequential_target_for_request;
+    use super::should_retry_proxy_send_failed_error;
     use super::should_stick_to_current_sequential_candidate;
+    use super::should_suspend_proxy_refresh;
     use super::should_use_responses_websocket;
     use super::should_use_responses_websocket_with_experiment;
     use super::sse_terminal_outcome;
@@ -6629,6 +7032,7 @@ mod tests {
     use super::ProxyCandidate;
     use super::ProxyLoadBalanceConfig;
     use super::RetryFailureCategory;
+    use super::SequentialStickyOutcome;
     use super::SseEvent;
     use super::SseTerminalOutcome;
     use super::API_PROXY_USAGE_RANGE_1H_SECONDS;
@@ -7150,6 +7554,41 @@ mod tests {
     }
 
     #[test]
+    fn sequential_sticky_keeps_current_first_when_available() {
+        let mut candidates = vec![
+            proxy_candidate("smart best", "a", Some(5.0), Some(10.0), false),
+            proxy_candidate("current", "b", Some(50.0), Some(70.0), false),
+        ];
+
+        let outcome = apply_sequential_sticky_current(&mut candidates, true, Some("b"));
+
+        assert_eq!(
+            outcome,
+            SequentialStickyOutcome::StuckToCurrent("current".to_string())
+        );
+        assert_eq!(candidate_labels(&candidates), vec!["current", "smart best"]);
+    }
+
+    #[test]
+    fn sequential_sticky_falls_back_when_current_was_filtered_out() {
+        let mut candidates = vec![
+            proxy_candidate("fallback a", "a", Some(5.0), Some(10.0), false),
+            proxy_candidate("fallback c", "c", Some(20.0), Some(20.0), false),
+        ];
+
+        let outcome = apply_sequential_sticky_current(&mut candidates, true, Some("b"));
+
+        assert_eq!(
+            outcome,
+            SequentialStickyOutcome::CurrentUnavailable { fallback_count: 2 }
+        );
+        assert_eq!(
+            candidate_labels(&candidates),
+            vec!["fallback a", "fallback c"]
+        );
+    }
+
+    #[test]
     fn sequential_load_balance_does_not_stick_to_current_at_limit() {
         let candidates = vec![
             proxy_candidate("current at limit", "a", Some(1.0), Some(80.0), false),
@@ -7598,7 +8037,7 @@ mod tests {
                 "reasoning": { "effort": "xhigh" },
                 "service_tier": "priority"
             })),
-            Duration::from_secs(20)
+            Duration::from_secs(DEFAULT_PROXY_UPSTREAM_HEADERS_TIMEOUT_SECS)
         );
     }
 
@@ -7644,6 +8083,84 @@ mod tests {
 
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].account_key, exhausted.account_key);
+    }
+
+    #[test]
+    fn filters_out_auth_refresh_blocked_candidates_before_upstream_attempt() {
+        let blocked = proxy_candidate("blocked", "blocked", Some(5.0), Some(20.0), true);
+        let ready = proxy_candidate("ready", "ready", Some(5.0), Some(20.0), false);
+
+        let filtered =
+            filter_proxy_candidates_for_auth_refresh_state(vec![blocked, ready.clone()], None);
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].account_key, ready.account_key);
+    }
+
+    #[test]
+    fn requested_account_header_restricts_candidate_pool_to_that_account() {
+        let requested = proxy_candidate("requested", "requested", Some(5.0), Some(20.0), false);
+        let fallback = proxy_candidate("fallback", "fallback", Some(5.0), Some(20.0), false);
+
+        let filtered = restrict_to_requested_chatgpt_account_id(
+            vec![fallback, requested.clone()],
+            Some("requested"),
+            None,
+        );
+
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].account_key, requested.account_key);
+    }
+
+    #[test]
+    fn requested_account_header_does_not_fall_back_to_other_accounts() {
+        let fallback = proxy_candidate("fallback", "fallback", Some(5.0), Some(20.0), false);
+
+        let filtered =
+            restrict_to_requested_chatgpt_account_id(vec![fallback], Some("missing"), None);
+
+        assert!(filtered.is_empty());
+    }
+
+    #[test]
+    fn requested_account_header_skips_sequential_target_persistence() {
+        let mut headers = HeaderMap::new();
+        headers.insert("chatgpt-account-id", "account-1".parse().unwrap());
+
+        assert!(!should_persist_sequential_target_for_request(&headers));
+    }
+
+    #[test]
+    fn missing_requested_account_header_keeps_sequential_target_persistence() {
+        let headers = HeaderMap::new();
+
+        assert!(should_persist_sequential_target_for_request(&headers));
+    }
+
+    #[test]
+    fn send_failed_error_strings_are_retriable_when_proxy_transport_breaks() {
+        assert!(should_retry_proxy_send_failed_error(
+            "C***: 请求 Codex 上游失败 https://chatgpt.com/backend-api/codex/responses: error sending request for url (https://chatgpt.com/backend-api/codex/responses)"
+        ));
+        assert!(!should_retry_proxy_send_failed_error(
+            "等待 Codex 上游响应头超时 https://chatgpt.com/backend-api/codex/responses"
+        ));
+    }
+
+    #[test]
+    fn short_sha256_hex_is_stable_for_payload_trace_correlation() {
+        assert_eq!(short_sha256_hex(b"payload"), "239f59ed55e737c7");
+    }
+
+    #[test]
+    fn empty_refresh_token_error_suspends_proxy_refresh() {
+        let error = "刷新登录令牌失败 https://auth.openai.com/oauth/token -> 400 Bad Request: { \"error\": { \"message\": \"Invalid 'refresh_token': empty string. Expected a string with minimum length 1, but got an empty string instead.\" } }";
+
+        assert!(should_suspend_proxy_refresh(error));
+        assert_eq!(
+            normalize_proxy_refresh_error(error),
+            "授权过期，请重新登录授权。"
+        );
     }
 
     #[test]
