@@ -3661,14 +3661,8 @@ async fn send_codex_request_over_candidates(
                             format!("{candidate_label}: {}", truncate_for_error(&error, 200)),
                         );
                     }
-                    cooldown_proxy_candidate(
-                        context,
-                        &candidate,
-                        now,
-                        "send_failed",
-                        responses_trace,
-                    )
-                    .await;
+                    cooldown_proxy_candidate(context, &candidate, "send_failed", responses_trace)
+                        .await;
                     attempt_errors.push(format!("{candidate_label}: {error}"));
                     break;
                 }
@@ -3698,7 +3692,6 @@ async fn send_codex_request_over_candidates(
                     cooldown_proxy_candidate(
                         context,
                         &candidate,
-                        now,
                         "auth_refresh_blocked",
                         responses_trace,
                     )
@@ -3728,7 +3721,6 @@ async fn send_codex_request_over_candidates(
                         cooldown_proxy_candidate(
                             context,
                             &candidate,
-                            now,
                             "auth_refresh_failed",
                             responses_trace,
                         )
@@ -3743,7 +3735,6 @@ async fn send_codex_request_over_candidates(
                 cooldown_proxy_candidate(
                     context,
                     &candidate,
-                    now,
                     failure.cooldown_reason(),
                     responses_trace,
                 )
@@ -4502,7 +4493,6 @@ async fn filter_proxy_candidates_for_runtime_cooldown(
 async fn cooldown_proxy_candidate(
     context: &ProxyContext,
     candidate: &ProxyCandidate,
-    now: i64,
     reason: &str,
     responses_trace: Option<&ResponsesTrace>,
 ) {
@@ -4511,7 +4501,7 @@ async fn cooldown_proxy_candidate(
     } else {
         PROXY_CANDIDATE_FAILURE_COOLDOWN_SECS
     };
-    let until = now.saturating_add(cooldown_seconds);
+    let until = now_unix_seconds().saturating_add(cooldown_seconds);
     {
         let mut shared = context.shared.lock().await;
         shared
@@ -6790,26 +6780,43 @@ async fn update_proxy_target(
     candidate: &ProxyCandidate,
     persist_sequential_target: bool,
 ) {
-    {
+    let should_persist_sequential_target = {
         let mut snapshot = context.shared.lock().await;
+        let should_persist = should_persist_sequential_account_key(
+            persist_sequential_target,
+            snapshot.sequential_account_key.as_deref(),
+            &candidate.account_key,
+        );
         snapshot.active_account_key = Some(candidate.account_key.clone());
         snapshot.active_account_id = Some(candidate.account_id.clone());
         snapshot.active_account_label = Some(candidate.label.clone());
         if persist_sequential_target {
             snapshot.sequential_account_key = Some(candidate.account_key.clone());
         }
-    }
+        should_persist
+    };
 
-    if !persist_sequential_target {
+    if !should_persist_sequential_target {
         return;
     }
 
-    if let Err(error) =
-        persist_sequential_proxy_account_key_if_enabled(&context.storage, &candidate.account_key)
-            .await
-    {
-        log::warn!("持久化 API 反代逐个模式账号失败: {error}");
-    }
+    let storage = context.storage.clone();
+    let account_key = candidate.account_key.clone();
+    tokio::spawn(async move {
+        if let Err(error) =
+            persist_sequential_proxy_account_key_if_enabled(&storage, &account_key).await
+        {
+            log::warn!("持久化 API 反代逐个模式账号失败: {error}");
+        }
+    });
+}
+
+fn should_persist_sequential_account_key(
+    persist_sequential_target: bool,
+    current_account_key: Option<&str>,
+    next_account_key: &str,
+) -> bool {
+    persist_sequential_target && current_account_key != Some(next_account_key)
 }
 
 async fn persist_sequential_proxy_account_key_if_enabled(
@@ -6985,6 +6992,7 @@ mod tests {
     use super::convert_openai_image_edit_request_to_codex;
     use super::convert_openai_image_generation_request_to_codex;
     use super::convert_responses_image_output_to_images_response;
+    use super::cooldown_proxy_candidate;
     use super::extract_completed_response_from_sse;
     use super::filter_proxy_candidates_for_auth_refresh_state;
     use super::filter_proxy_candidates_for_usage;
@@ -6992,6 +7000,7 @@ mod tests {
     use super::format_service_tier_trace_details;
     use super::host_matches_no_proxy;
     use super::is_responses_terminal_event;
+    use super::new_proxy_storage_context;
     use super::normalize_openai_responses_request;
     use super::normalize_proxy_refresh_error;
     use super::normalize_responses_websocket_create;
@@ -7012,6 +7021,7 @@ mod tests {
     use super::sequential_account_key_for_request;
     use super::service_tier_for_trace;
     use super::short_sha256_hex;
+    use super::should_persist_sequential_account_key;
     use super::should_persist_sequential_target_for_request;
     use super::should_retry_proxy_send_failed_error;
     use super::should_stick_to_current_sequential_candidate;
@@ -7021,6 +7031,7 @@ mod tests {
     use super::sse_terminal_outcome;
     use super::translate_sse_event_to_chat_chunk;
     use super::translate_sse_event_to_image_chunk;
+    use super::update_proxy_target;
     use super::upstream_headers_timeout_for_payload;
     use super::upstream_session_id_for_request;
     use super::wait_for_upstream_headers;
@@ -7030,6 +7041,7 @@ mod tests {
     use super::ChatStreamState;
     use super::ImageMultipartRequest;
     use super::ProxyCandidate;
+    use super::ProxyContext;
     use super::ProxyLoadBalanceConfig;
     use super::RetryFailureCategory;
     use super::SequentialStickyOutcome;
@@ -7039,16 +7051,23 @@ mod tests {
     use super::API_PROXY_USAGE_RETENTION_SECONDS;
     use super::DEFAULT_PROXY_REQUEST_BODY_LIMIT_BYTES;
     use super::DEFAULT_PROXY_UPSTREAM_HEADERS_TIMEOUT_SECS;
+    use super::PROXY_CANDIDATE_SEND_FAILED_COOLDOWN_SECS;
     use crate::models::ApiProxyLoadBalanceMode;
     use crate::models::AppSettings;
     use crate::models::UsageSnapshot;
     use crate::models::UsageWindow;
+    use crate::state::ApiProxyRuntimeSnapshot;
     use axum::body::Bytes;
     use axum::http::HeaderMap;
     use reqwest::StatusCode;
     use serde_json::json;
     use serde_json::Value;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use std::sync::RwLock;
     use std::time::Duration;
+    use uuid::Uuid;
 
     fn model_by_id<'a>(models: &'a Value, id: &str) -> &'a Value {
         models
@@ -7154,6 +7173,33 @@ mod tests {
             model: model.to_string(),
             calls,
             tokens,
+        }
+    }
+
+    fn temp_proxy_data_dir() -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("codex-tools-proxy-test-{}", Uuid::new_v4()));
+        fs::create_dir_all(&dir).expect("create temp proxy data dir");
+        dir
+    }
+
+    fn proxy_context_for_test(
+        data_dir: PathBuf,
+        store_lock: Arc<tokio::sync::Mutex<()>>,
+    ) -> ProxyContext {
+        ProxyContext {
+            storage: new_proxy_storage_context(
+                data_dir,
+                store_lock,
+                Arc::new(tokio::sync::Mutex::new(())),
+                Arc::new(tokio::sync::Mutex::new(())),
+                true,
+            ),
+            api_key: Arc::new(RwLock::new("test-key".to_string())),
+            upstream_base_url: "http://127.0.0.1".to_string(),
+            default_session_id: "test-session".to_string(),
+            client: reqwest::Client::new(),
+            shared: Arc::new(tokio::sync::Mutex::new(ApiProxyRuntimeSnapshot::default())),
+            candidate_cache: Arc::new(tokio::sync::Mutex::new(None)),
         }
     }
 
@@ -8144,6 +8190,75 @@ mod tests {
         ));
         assert!(!should_retry_proxy_send_failed_error(
             "等待 Codex 上游响应头超时 https://chatgpt.com/backend-api/codex/responses"
+        ));
+    }
+
+    #[tokio::test]
+    async fn cooldown_candidate_until_is_later_than_call_time_with_stale_selection_time() {
+        let context =
+            proxy_context_for_test(temp_proxy_data_dir(), Arc::new(tokio::sync::Mutex::new(())));
+        let candidate = proxy_candidate("slow", "slow", Some(5.0), Some(20.0), false);
+        let stale_selection_time =
+            now_unix_seconds() - PROXY_CANDIDATE_SEND_FAILED_COOLDOWN_SECS - 5;
+        let set_started = now_unix_seconds();
+        assert!(stale_selection_time < set_started);
+
+        cooldown_proxy_candidate(&context, &candidate, "send_failed", None).await;
+
+        let until = context
+            .shared
+            .lock()
+            .await
+            .candidate_cooldowns
+            .get(&candidate.account_key)
+            .copied()
+            .expect("candidate cooldown should be set");
+        assert!(
+            until > set_started,
+            "cooldown until {until} should be later than call time {set_started}"
+        );
+    }
+
+    #[tokio::test]
+    async fn update_proxy_target_returns_before_sequential_persistence_lock_releases() {
+        let store_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let held_store_lock = store_lock.lock().await;
+        let context = proxy_context_for_test(temp_proxy_data_dir(), Arc::clone(&store_lock));
+        let candidate = proxy_candidate("selected", "selected", Some(5.0), Some(20.0), false);
+
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            update_proxy_target(&context, &candidate, true),
+        )
+        .await
+        .expect("update_proxy_target should not wait for store persistence");
+
+        let snapshot = context.shared.lock().await;
+        assert_eq!(snapshot.active_account_key.as_deref(), Some("selected"));
+        assert_eq!(snapshot.sequential_account_key.as_deref(), Some("selected"));
+        drop(snapshot);
+        drop(held_store_lock);
+    }
+
+    #[test]
+    fn should_persist_sequential_account_key_only_for_enabled_changes() {
+        assert!(!should_persist_sequential_account_key(
+            false,
+            Some("current"),
+            "next"
+        ));
+        assert!(!should_persist_sequential_account_key(
+            true,
+            Some("selected"),
+            "selected"
+        ));
+        assert!(should_persist_sequential_account_key(
+            true, None, "selected"
+        ));
+        assert!(should_persist_sequential_account_key(
+            true,
+            Some("previous"),
+            "selected"
         ));
     }
 

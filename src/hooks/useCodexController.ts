@@ -36,7 +36,6 @@ import type {
 } from "../types/app";
 import { pickBestSmartSwitchAccount, sortAccountsByRemaining } from "../utils/accountRanking";
 
-const REFRESH_MS = 30_000;
 const TOKEN_USAGE_REFRESH_MS = 60_000;
 const EDITOR_SCAN_MS = 60_000;
 const UPDATE_CHECK_MS = 60 * 60 * 1000;
@@ -44,6 +43,9 @@ const API_PROXY_POLL_MS = 4_000;
 const DASHBOARD_POLL_MS = 5_000;
 const API_PROXY_USAGE_POLL_MS = 2_000;
 const CLOUDFLARED_POLL_MS = 3_000;
+const DEFAULT_USAGE_REFRESH_INTERVAL_MINUTES = 1;
+const MIN_USAGE_REFRESH_INTERVAL_MINUTES = 1;
+const MAX_USAGE_REFRESH_INTERVAL_MINUTES = 1_440;
 const DEFAULT_API_PROXY_USAGE_RANGE: ApiProxyUsageRange = "24h";
 const DEFAULT_API_PROXY_USAGE_METRIC: ApiProxyUsageMetric = "calls";
 const API_PROXY_USAGE_RANGE_SECONDS: Record<ApiProxyUsageRange, number> = {
@@ -69,6 +71,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   apiProxyGpt55AutoCompactTokenLimit: 650_000,
   apiProxyLoadBalanceMode: "average",
   apiProxySequentialFiveHourLimitPercent: 80,
+  usageRefreshIntervalMinutes: DEFAULT_USAGE_REFRESH_INTERVAL_MINUTES,
   remoteServers: [],
   locale: DEFAULT_LOCALE,
   skippedUpdateVersion: null,
@@ -88,6 +91,17 @@ const DEFAULT_API_PROXY_STATUS: ApiProxyStatus = {
 const DEFAULT_RUNTIME_DATA_INFO: RuntimeDataInfo = {
   dataDir: "",
 };
+
+function normalizeUsageRefreshIntervalMinutes(value: number | null | undefined): number {
+  if (!Number.isFinite(value)) {
+    return DEFAULT_USAGE_REFRESH_INTERVAL_MINUTES;
+  }
+  return Math.max(
+    MIN_USAGE_REFRESH_INTERVAL_MINUTES,
+    Math.min(MAX_USAGE_REFRESH_INTERVAL_MINUTES, Math.trunc(value as number)),
+  );
+}
+
 const DEFAULT_CLOUDFLARED_STATUS: CloudflaredStatus = {
   installed: false,
   binaryPath: null,
@@ -234,6 +248,12 @@ export function useCodexController() {
   const profileIntegrityPromptedRef = useRef(false);
 
   const sortedAccounts = useMemo(() => sortAccountsByRemaining(accounts), [accounts]);
+  const usageRefreshIntervalMs = useMemo(
+    () =>
+      normalizeUsageRefreshIntervalMinutes(settings.usageRefreshIntervalMinutes) *
+      60_000,
+    [settings.usageRefreshIntervalMinutes],
+  );
 
   const localizeError = useCallback(
     (error: string) => localizeBackendError(error, locale),
@@ -764,10 +784,6 @@ export function useCodexController() {
 
     void bootstrap();
 
-    const usageTimer = setInterval(() => {
-      void refreshUsage(true);
-    }, REFRESH_MS);
-
     const tokenUsageTimer = setInterval(() => {
       void refreshTokenUsage(true);
     }, TOKEN_USAGE_REFRESH_MS);
@@ -783,7 +799,6 @@ export function useCodexController() {
 
     return () => {
       cancelled = true;
-      clearInterval(usageTimer);
       clearInterval(tokenUsageTimer);
       clearInterval(editorTimer);
       clearInterval(updateTimer);
@@ -803,6 +818,20 @@ export function useCodexController() {
     refreshTokenUsage,
     refreshUsage,
   ]);
+
+  useEffect(() => {
+    if (loading) {
+      return;
+    }
+
+    const timer = setInterval(() => {
+      void refreshUsage(true);
+    }, usageRefreshIntervalMs);
+
+    return () => {
+      clearInterval(timer);
+    };
+  }, [loading, refreshUsage, usageRefreshIntervalMs]);
 
   useEffect(() => {
     if (loading) {

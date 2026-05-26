@@ -17,6 +17,9 @@ pub(crate) const MIN_API_PROXY_GPT55_CONTEXT_WINDOW: u64 = 1_000;
 pub(crate) const MAX_API_PROXY_GPT55_CONTEXT_WINDOW: u64 = 1_050_000;
 pub(crate) const DEFAULT_API_PROXY_GPT55_AUTO_COMPACT_TOKEN_LIMIT: u64 = 650_000;
 pub(crate) const MIN_API_PROXY_GPT55_AUTO_COMPACT_TOKEN_LIMIT: u64 = 1_000;
+pub(crate) const DEFAULT_USAGE_REFRESH_INTERVAL_MINUTES: u64 = 1;
+pub(crate) const MIN_USAGE_REFRESH_INTERVAL_MINUTES: u64 = 1;
+pub(crate) const MAX_USAGE_REFRESH_INTERVAL_MINUTES: u64 = 1_440;
 
 fn default_api_proxy_gpt55_context_window() -> u64 {
     DEFAULT_API_PROXY_GPT55_CONTEXT_WINDOW
@@ -24,6 +27,10 @@ fn default_api_proxy_gpt55_context_window() -> u64 {
 
 fn default_api_proxy_gpt55_auto_compact_token_limit() -> u64 {
     DEFAULT_API_PROXY_GPT55_AUTO_COMPACT_TOKEN_LIMIT
+}
+
+fn default_usage_refresh_interval_minutes() -> u64 {
+    DEFAULT_USAGE_REFRESH_INTERVAL_MINUTES
 }
 
 fn default_account_enabled() -> bool {
@@ -40,6 +47,13 @@ pub(crate) fn normalize_api_proxy_sequential_five_hour_limit_percent(value: f64)
     } else {
         default_api_proxy_sequential_five_hour_limit_percent()
     }
+}
+
+pub(crate) fn normalize_usage_refresh_interval_minutes(value: u64) -> u64 {
+    value.clamp(
+        MIN_USAGE_REFRESH_INTERVAL_MINUTES,
+        MAX_USAGE_REFRESH_INTERVAL_MINUTES,
+    )
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -472,6 +486,8 @@ pub(crate) struct AppSettings {
     pub(crate) api_proxy_sequential_five_hour_limit_percent: f64,
     #[serde(default)]
     pub(crate) api_proxy_sequential_account_key: Option<String>,
+    #[serde(default = "default_usage_refresh_interval_minutes")]
+    pub(crate) usage_refresh_interval_minutes: u64,
     pub(crate) remote_servers: Vec<RemoteServerConfig>,
     pub(crate) api_proxy_api_key: Option<String>,
     pub(crate) locale: AppLocale,
@@ -501,6 +517,7 @@ impl Default for AppSettings {
             api_proxy_sequential_five_hour_limit_percent:
                 default_api_proxy_sequential_five_hour_limit_percent(),
             api_proxy_sequential_account_key: None,
+            usage_refresh_interval_minutes: default_usage_refresh_interval_minutes(),
             remote_servers: Vec::new(),
             api_proxy_api_key: None,
             locale: AppLocale::default(),
@@ -527,6 +544,7 @@ pub(crate) struct AppSettingsPatch {
     pub(crate) api_proxy_gpt55_auto_compact_token_limit: Option<u64>,
     pub(crate) api_proxy_load_balance_mode: Option<ApiProxyLoadBalanceMode>,
     pub(crate) api_proxy_sequential_five_hour_limit_percent: Option<f64>,
+    pub(crate) usage_refresh_interval_minutes: Option<u64>,
     pub(crate) remote_servers: Option<Vec<RemoteServerConfig>>,
     pub(crate) locale: Option<AppLocale>,
     pub(crate) skipped_update_version: Option<Option<String>>,
@@ -792,6 +810,7 @@ mod tests {
     use super::dedupe_account_variants;
     use super::normalize_api_proxy_gpt55_auto_compact_token_limit;
     use super::normalize_api_proxy_gpt55_context_window;
+    use super::normalize_usage_refresh_interval_minutes;
     use super::AppSettings;
     use super::AppSettingsPatch;
     use super::StoredAccount;
@@ -877,6 +896,19 @@ mod tests {
     }
 
     #[test]
+    fn app_settings_defaults_usage_refresh_interval_to_one_minute() {
+        assert_eq!(AppSettings::default().usage_refresh_interval_minutes, 1);
+    }
+
+    #[test]
+    fn normalizes_usage_refresh_interval_minutes_to_safe_range() {
+        assert_eq!(normalize_usage_refresh_interval_minutes(0), 1);
+        assert_eq!(normalize_usage_refresh_interval_minutes(1), 1);
+        assert_eq!(normalize_usage_refresh_interval_minutes(30), 30);
+        assert_eq!(normalize_usage_refresh_interval_minutes(1_500), 1_440);
+    }
+
+    #[test]
     fn normalizes_invalid_gpt_5_5_context_window_to_official_max() {
         assert_eq!(normalize_api_proxy_gpt55_context_window(999), 1_050_000);
         assert_eq!(
@@ -907,6 +939,7 @@ mod tests {
         let patch: AppSettingsPatch = serde_json::from_value(json!({
             "apiProxyGpt55ContextWindow": 258_400,
             "apiProxyGpt55AutoCompactTokenLimit": 200_000,
+            "usageRefreshIntervalMinutes": 5,
         }))
         .unwrap();
 
@@ -915,6 +948,7 @@ mod tests {
             patch.api_proxy_gpt55_auto_compact_token_limit,
             Some(200_000)
         );
+        assert_eq!(patch.usage_refresh_interval_minutes, Some(5));
         assert_eq!(patch.api_proxy_port, None);
         assert_eq!(patch.auto_start_api_proxy, None);
         assert!(patch.remote_servers.is_none());

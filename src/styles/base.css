@@ -179,6 +179,43 @@
   cursor: default;
 }
 
+.usageRefreshControl {
+  height: 38px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--line) 78%, var(--surface-tint) 22%);
+  background: color-mix(in srgb, var(--surface-tint) 74%, transparent);
+  color: var(--subtle);
+  font: 600 0.74rem/1 var(--font-ui);
+}
+
+.usageRefreshInput {
+  width: 38px;
+  height: 24px;
+  border: 0;
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--body-bg) 72%, var(--surface-tint) 28%);
+  color: var(--ink);
+  font: 700 0.78rem/1 var(--font-mono);
+  text-align: center;
+  outline: none;
+}
+
+.usageRefreshInput:focus {
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--brand-cool) 48%, transparent);
+}
+
+.usageRefreshInput:disabled {
+  opacity: 0.6;
+}
+
+.usageRefreshUnit {
+  color: var(--subtle);
+}
+
 .smartSwitchButton {
   min-width: 124px;
   border-radius: 12px;

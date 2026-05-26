@@ -9,7 +9,9 @@ use uuid::Uuid;
 use tauri::AppHandle;
 
 use crate::app_paths;
+use crate::auth::account_group_key;
 use crate::auth::account_variant_key;
+use crate::auth::auth_json_has_refresh_token;
 use crate::auth::current_auth_account_key;
 use crate::auth::extract_auth;
 use crate::auth::read_current_codex_auth_optional;
@@ -283,6 +285,9 @@ fn normalize_loaded_store(path: &Path, mut store: AccountsStore) -> AccountsStor
         if profile_files::ensure_profile_metadata(path, account) {
             changed = true;
         }
+        if repair_missing_refresh_token_from_profile(path, account) {
+            changed = true;
+        }
         if repair_missing_profile_files(path, account) {
             changed = true;
         }
@@ -321,6 +326,41 @@ fn repair_missing_profile_files(path: &Path, account: &mut StoredAccount) -> boo
             false
         }
     }
+}
+
+fn repair_missing_refresh_token_from_profile(path: &Path, account: &mut StoredAccount) -> bool {
+    if !matches!(account.source_kind, AccountSourceKind::Chatgpt)
+        || auth_json_has_refresh_token(&account.auth_json)
+    {
+        return false;
+    }
+
+    let auth_path = profile_files::profile_auth_path_from_store_path(path, &account.id);
+    let Ok(contents) = fs::read_to_string(&auth_path) else {
+        return false;
+    };
+    let Ok(profile_auth) = serde_json::from_str::<serde_json::Value>(&contents) else {
+        return false;
+    };
+    if !auth_json_has_refresh_token(&profile_auth) {
+        return false;
+    }
+    let Ok(extracted) = extract_auth(&profile_auth) else {
+        return false;
+    };
+    if account_group_key(&extracted.principal_id, &extracted.account_id) != account.account_key() {
+        return false;
+    }
+
+    account.principal_id = Some(extracted.principal_id);
+    account.account_id = extracted.account_id;
+    account.email = extracted.email.or_else(|| account.email.clone());
+    account.plan_type = extracted.plan_type.or_else(|| account.plan_type.clone());
+    account.auth_json = profile_auth;
+    account.auth_refresh_blocked = false;
+    account.auth_refresh_error = None;
+    account.updated_at = now_unix_seconds();
+    true
 }
 
 fn can_sync_profile(account: &StoredAccount) -> bool {
@@ -612,6 +652,8 @@ mod tests {
     use crate::models::AccountSourceKind;
     use crate::models::AccountsStore;
     use crate::models::StoredAccount;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine;
     use serde_json::json;
     use std::fs;
     use std::path::PathBuf;
@@ -656,6 +698,36 @@ mod tests {
             }],
             settings: Default::default(),
         }
+    }
+
+    fn chatgpt_auth_json(
+        email: &str,
+        account_id: &str,
+        refresh_token: Option<&str>,
+    ) -> serde_json::Value {
+        let header = URL_SAFE_NO_PAD.encode(r#"{}"#);
+        let payload = URL_SAFE_NO_PAD.encode(
+            json!({
+                "email": email,
+                "https://api.openai.com/auth": {
+                    "chatgpt_account_id": account_id,
+                    "chatgpt_plan_type": "plus"
+                }
+            })
+            .to_string(),
+        );
+        let mut auth_json = json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "access_token": "access-token",
+                "id_token": format!("{header}.{payload}.sig"),
+                "account_id": account_id
+            }
+        });
+        if let Some(refresh_token) = refresh_token {
+            auth_json["tokens"]["refresh_token"] = json!(refresh_token);
+        }
+        auth_json
     }
 
     #[test]
@@ -824,6 +896,56 @@ mod tests {
         assert!(persisted.accounts[0].profile_auth_ready);
         assert!(persisted.accounts[0].profile_config_ready);
         assert_eq!(persisted.accounts[0].profile_integrity_error, None);
+    }
+
+    #[test]
+    fn load_store_repairs_missing_refresh_token_from_profile_auth() {
+        let dir = temp_dir();
+        let store_path = dir.join("accounts.json");
+        let mut store = sample_store("paxton", "workspace-1", 10);
+        let account = &mut store.accounts[0];
+        account.id = "account-1".to_string();
+        account.label = "paxton@example.com".to_string();
+        account.principal_id = Some("paxton@example.com".to_string());
+        account.email = Some("paxton@example.com".to_string());
+        account.account_id = "workspace-1".to_string();
+        account.plan_type = Some("plus".to_string());
+        account.auth_json = chatgpt_auth_json("paxton@example.com", "workspace-1", None);
+        account.auth_refresh_blocked = true;
+        account.auth_refresh_error = Some("授权过期，请重新登录授权。".to_string());
+        fs::write(
+            &store_path,
+            serde_json::to_string_pretty(&store).expect("serialize store"),
+        )
+        .expect("write store");
+
+        let profile_auth_path = dir.join("profiles").join("account-1").join("auth.json");
+        fs::create_dir_all(profile_auth_path.parent().expect("profile parent"))
+            .expect("create profile dir");
+        fs::write(
+            &profile_auth_path,
+            serde_json::to_string_pretty(&chatgpt_auth_json(
+                "paxton@example.com",
+                "workspace-1",
+                Some("refresh-token"),
+            ))
+            .expect("serialize profile auth"),
+        )
+        .expect("write profile auth");
+
+        let loaded = load_store_from_path(&store_path).expect("load store");
+        let account = &loaded.accounts[0];
+
+        assert!(!account.auth_refresh_blocked);
+        assert_eq!(account.auth_refresh_error, None);
+        assert_eq!(
+            account
+                .auth_json
+                .get("tokens")
+                .and_then(|tokens| tokens.get("refresh_token"))
+                .and_then(|value| value.as_str()),
+            Some("refresh-token")
+        );
     }
 
     #[test]

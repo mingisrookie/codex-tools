@@ -10,6 +10,9 @@
     "checkingUpdate": "Checking updates",
     "manualRefresh": "Refresh usage",
     "refreshing": "Refreshing",
+    "usageRefreshIntervalLabel": "Usage refresh",
+    "usageRefreshIntervalUnit": "min",
+    "usageRefreshIntervalHint": "Interval for automatic account usage refreshes. Minimum: 1 minute.",
     "openSettings": "Open settings",
     "toggleLanguage": "Switch language (next: {{nextLanguage}})",
     "languagePicker": "Language"

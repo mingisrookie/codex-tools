@@ -5,6 +5,7 @@ use crate::cli;
 use crate::models::normalize_api_proxy_gpt55_auto_compact_token_limit;
 use crate::models::normalize_api_proxy_gpt55_context_window;
 use crate::models::normalize_api_proxy_sequential_five_hour_limit_percent;
+use crate::models::normalize_usage_refresh_interval_minutes;
 use crate::models::AppSettings;
 use crate::models::AppSettingsPatch;
 use crate::state::AppState;
@@ -32,6 +33,8 @@ pub(crate) async fn get_app_settings_internal(
     store.settings.api_proxy_gpt55_auto_compact_token_limit = store
         .settings
         .normalized_api_proxy_gpt55_auto_compact_token_limit();
+    store.settings.usage_refresh_interval_minutes =
+        normalize_usage_refresh_interval_minutes(store.settings.usage_refresh_interval_minutes);
     Ok(store.settings)
 }
 
@@ -102,6 +105,10 @@ pub(crate) async fn update_app_settings_internal(
         if let Some(value) = patch.api_proxy_sequential_five_hour_limit_percent {
             store.settings.api_proxy_sequential_five_hour_limit_percent =
                 normalize_api_proxy_sequential_five_hour_limit_percent(value);
+        }
+        if let Some(value) = patch.usage_refresh_interval_minutes {
+            store.settings.usage_refresh_interval_minutes =
+                normalize_usage_refresh_interval_minutes(value);
         }
         if let Some(value) = patch.remote_servers {
             store.settings.remote_servers = value;

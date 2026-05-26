@@ -10,6 +10,9 @@
     "checkingUpdate": "检查更新中",
     "manualRefresh": "手动刷新",
     "refreshing": "刷新中",
+    "usageRefreshIntervalLabel": "用量刷新",
+    "usageRefreshIntervalUnit": "分钟",
+    "usageRefreshIntervalHint": "自动请求账号用量接口的间隔，最小 1 分钟",
     "openSettings": "打开设置",
     "toggleLanguage": "切换语言（下一项：{{nextLanguage}}）",
     "languagePicker": "语言"

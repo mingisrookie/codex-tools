@@ -374,6 +374,7 @@ export type AppSettings = {
   apiProxyGpt55AutoCompactTokenLimit: number;
   apiProxyLoadBalanceMode: ApiProxyLoadBalanceMode;
   apiProxySequentialFiveHourLimitPercent: number;
+  usageRefreshIntervalMinutes: number;
   remoteServers: RemoteServerConfig[];
   locale: AppLocale;
   skippedUpdateVersion: string | null;

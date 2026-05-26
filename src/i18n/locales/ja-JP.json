@@ -10,6 +10,9 @@
     "checkingUpdate": "アップデート確認中",
     "manualRefresh": "使用量を更新",
     "refreshing": "更新中",
+    "usageRefreshIntervalLabel": "使用量更新",
+    "usageRefreshIntervalUnit": "分",
+    "usageRefreshIntervalHint": "アカウント使用量を自動更新する間隔です。最小 1 分。",
     "openSettings": "設定を開く",
     "toggleLanguage": "言語を切り替え（次: {{nextLanguage}}）",
     "languagePicker": "言語"

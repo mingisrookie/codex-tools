@@ -724,6 +724,15 @@ fn auth_token_object(auth_json: &Value) -> Option<&Map<String, Value>> {
         })
 }
 
+pub(crate) fn auth_json_has_refresh_token(auth_json: &Value) -> bool {
+    auth_token_object(auth_json)
+        .and_then(|tokens| tokens.get("refresh_token"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .map(|value| !value.is_empty())
+        .unwrap_or(false)
+}
+
 fn normalize_auth_json_for_codex(auth_json: Value) -> Value {
     let Some(root) = auth_json.as_object() else {
         return auth_json;

@@ -10,6 +10,9 @@
     "checkingUpdate": "Проверка обновлений",
     "manualRefresh": "Обновить использование",
     "refreshing": "Обновление",
+    "usageRefreshIntervalLabel": "Usage refresh",
+    "usageRefreshIntervalUnit": "мин",
+    "usageRefreshIntervalHint": "Интервал автоматического обновления usage аккаунтов. Минимум: 1 минута.",
     "openSettings": "Открыть настройки",
     "toggleLanguage": "Сменить язык (следующий: {{nextLanguage}})",
     "languagePicker": "Язык"

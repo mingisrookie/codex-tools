@@ -54,6 +54,9 @@ export type MessageCatalog = {
     checkingUpdate: string;
     manualRefresh: string;
     refreshing: string;
+    usageRefreshIntervalLabel: string;
+    usageRefreshIntervalUnit: string;
+    usageRefreshIntervalHint: string;
     openSettings: string;
     toggleLanguage: (nextLanguage: string) => string;
     languagePicker: string;

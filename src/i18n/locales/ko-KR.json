@@ -10,6 +10,9 @@
     "checkingUpdate": "업데이트 확인 중",
     "manualRefresh": "사용량 새로고침",
     "refreshing": "새로고침 중",
+    "usageRefreshIntervalLabel": "사용량 새로고침",
+    "usageRefreshIntervalUnit": "분",
+    "usageRefreshIntervalHint": "계정 사용량을 자동으로 새로고침하는 간격입니다. 최소 1분입니다.",
     "openSettings": "설정 열기",
     "toggleLanguage": "언어 전환 (다음: {{nextLanguage}})",
     "languagePicker": "언어"

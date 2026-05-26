@@ -156,6 +156,14 @@ function App() {
                     refreshing={refreshing || refreshingTokenUsage}
                     onGoHome={() => setActiveTab("accounts")}
                     showRefresh={activeTab === "accounts"}
+                    usageRefreshIntervalMinutes={settings.usageRefreshIntervalMinutes}
+                    savingSettings={savingSettings}
+                    onUsageRefreshIntervalChange={(minutes) =>
+                        void updateSettings(
+                            { usageRefreshIntervalMinutes: minutes },
+                            { silent: true, keepInteractive: true },
+                        )
+                    }
                 />
 
                 <AddAccountDialog

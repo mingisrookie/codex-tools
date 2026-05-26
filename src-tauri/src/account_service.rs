@@ -13,6 +13,7 @@ use zip::CompressionMethod;
 use crate::app_paths;
 use crate::auth::account_group_key;
 use crate::auth::account_variant_key;
+use crate::auth::auth_json_has_refresh_token;
 use crate::auth::auth_tokens_need_keepalive_refresh;
 use crate::auth::current_auth_account_key;
 use crate::auth::current_auth_variant_key;
@@ -582,12 +583,17 @@ fn build_refresh_targets(
         }
 
         let account_key = account.account_key();
+        let stored_auth_json = account.auth_json;
         let current_override = current_auth_override
             .filter(|(current_account_key, _)| current_account_key == &account_key);
-        let auth_is_current = current_override.is_some();
-        let auth_json = current_override
-            .map(|(_, auth_json)| auth_json.clone())
-            .unwrap_or(account.auth_json);
+        let (auth_json, auth_is_current) = match current_override.map(|(_, auth_json)| auth_json) {
+            Some(current_auth_json)
+                if should_use_current_auth_override(&stored_auth_json, current_auth_json) =>
+            {
+                (current_auth_json.clone(), true)
+            }
+            _ => (stored_auth_json, false),
+        };
 
         let candidate = RefreshTarget {
             account_key: account_key.clone(),
@@ -621,6 +627,13 @@ fn build_refresh_targets(
             .then(left.account_key.cmp(&right.account_key))
     });
     targets
+}
+
+fn should_use_current_auth_override(
+    stored_auth_json: &serde_json::Value,
+    current_auth_json: &serde_json::Value,
+) -> bool {
+    auth_json_has_refresh_token(current_auth_json) || !auth_json_has_refresh_token(stored_auth_json)
 }
 
 fn should_replace_refresh_target(existing: &RefreshTarget, candidate: &RefreshTarget) -> bool {
@@ -1814,6 +1827,43 @@ mod tests {
 
         assert_eq!(targets.len(), 1);
         assert_eq!(targets[0].account_key, "enabled@example.com|workspace-1");
+    }
+
+    #[test]
+    fn build_refresh_targets_keeps_stored_refresh_token_over_current_auth_without_one() {
+        let mut account = stored_test_account("paxton", "paxton@example.com", 2);
+        account.auth_json = json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "access_token": "stored-access",
+                "id_token": "stored-id",
+                "refresh_token": "stored-refresh"
+            }
+        });
+        let account_key = account.account_key();
+        let current_auth_without_refresh = json!({
+            "auth_mode": "chatgpt",
+            "tokens": {
+                "access_token": "current-access",
+                "id_token": "current-id"
+            }
+        });
+
+        let targets = build_refresh_targets(
+            vec![account],
+            Some(&(account_key, current_auth_without_refresh)),
+        );
+
+        assert_eq!(targets.len(), 1);
+        assert!(!targets[0].auth_is_current);
+        assert_eq!(
+            targets[0]
+                .auth_json
+                .get("tokens")
+                .and_then(|tokens| tokens.get("refresh_token"))
+                .and_then(|value| value.as_str()),
+            Some("stored-refresh")
+        );
     }
 
     #[test]
