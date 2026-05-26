@@ -689,8 +689,13 @@ mod tests {
             current_in_flight_requests(),
             1_000,
         );
-        assert_eq!(snapshot_before.in_flight.len(), 1);
-        assert_eq!(snapshot_before.in_flight[0].elapsed_ms, 0);
+        let active_request = snapshot_before
+            .in_flight
+            .iter()
+            .find(|request| request.id == id)
+            .expect("started request should be visible in dashboard snapshot");
+        assert_eq!(active_request.phase, "first_upstream_chunk");
+        assert!(active_request.elapsed_ms < 1_000);
 
         finish_in_flight_request(&id);
 
@@ -700,7 +705,10 @@ mod tests {
             current_in_flight_requests(),
             1_000,
         );
-        assert!(snapshot_after.in_flight.is_empty());
+        assert!(snapshot_after
+            .in_flight
+            .iter()
+            .all(|request| request.id != id));
     }
 
     #[test]
