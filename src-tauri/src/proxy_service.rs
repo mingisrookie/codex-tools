@@ -1475,7 +1475,8 @@ async fn chat_completions_handler(
     };
 
     let (candidate, upstream_response) = upstream;
-    let persist_sequential_target = should_persist_sequential_target_for_request(&headers);
+    let persist_sequential_target =
+        should_persist_sequential_target_for_request(&headers, &candidate);
     update_proxy_target(&context, &candidate, persist_sequential_target).await;
     update_proxy_error(&context, None).await;
     let usage_metadata =
@@ -1638,7 +1639,8 @@ async fn responses_handler(
             upstream_response.status(),
         ),
     );
-    let persist_sequential_target = should_persist_sequential_target_for_request(&headers);
+    let persist_sequential_target =
+        should_persist_sequential_target_for_request(&headers, &candidate);
     let proxy_target_update_started = Instant::now();
     update_proxy_target(&context, &candidate, persist_sequential_target).await;
     trace.log(
@@ -1837,7 +1839,8 @@ async fn forward_image_request(
     };
 
     let (candidate, upstream_response) = upstream;
-    let persist_sequential_target = should_persist_sequential_target_for_request(&headers);
+    let persist_sequential_target =
+        should_persist_sequential_target_for_request(&headers, &candidate);
     update_proxy_target(&context, &candidate, persist_sequential_target).await;
     update_proxy_error(&context, None).await;
     let usage_metadata = api_proxy_usage_metadata(&candidate, route, &upstream_payload);
@@ -1986,7 +1989,8 @@ async fn handle_responses_websocket(
     };
 
     let (candidate, upstream_response) = upstream;
-    let persist_sequential_target = should_persist_sequential_target_for_request(&headers);
+    let persist_sequential_target =
+        should_persist_sequential_target_for_request(&headers, &candidate);
     update_proxy_target(&context, &candidate, persist_sequential_target).await;
     update_proxy_error(&context, None).await;
     let usage_metadata =
@@ -3536,7 +3540,11 @@ async fn send_codex_request_over_candidates(
     );
     let requested_account_id = requested_chatgpt_account_id_for_request(headers);
     let now = now_unix_seconds();
-    let stick_to_current_candidate = requested_account_id.is_none()
+    let requested_account_id_matched = requested_account_id_matches_candidate(
+        &selection.candidates,
+        requested_account_id.as_deref(),
+    );
+    let stick_to_current_candidate = !requested_account_id_matched
         && should_stick_to_current_sequential_candidate(
             &selection.candidates,
             selection.load_balance,
@@ -4261,8 +4269,26 @@ fn requested_chatgpt_account_id_for_request(headers: &HeaderMap) -> Option<Strin
         .map(ToString::to_string)
 }
 
-fn should_persist_sequential_target_for_request(headers: &HeaderMap) -> bool {
-    requested_chatgpt_account_id_for_request(headers).is_none()
+fn requested_account_id_matches_candidate(
+    candidates: &[ProxyCandidate],
+    requested_account_id: Option<&str>,
+) -> bool {
+    let Some(requested_account_id) = requested_account_id else {
+        return false;
+    };
+
+    candidates
+        .iter()
+        .any(|candidate| candidate.account_id == requested_account_id)
+}
+
+fn should_persist_sequential_target_for_request(
+    headers: &HeaderMap,
+    candidate: &ProxyCandidate,
+) -> bool {
+    requested_chatgpt_account_id_for_request(headers)
+        .as_deref()
+        .is_none_or(|requested_account_id| requested_account_id != candidate.account_id)
 }
 
 fn should_retry_proxy_send_failed_error(error: &str) -> bool {
@@ -4279,6 +4305,7 @@ fn restrict_to_requested_chatgpt_account_id(
     };
 
     let mut matched = Vec::new();
+    let mut fallback_candidates = Vec::new();
     for candidate in candidates {
         if candidate.account_id == requested_account_id {
             if let Some(trace) = responses_trace {
@@ -4288,6 +4315,8 @@ fn restrict_to_requested_chatgpt_account_id(
                 );
             }
             matched.push(candidate);
+        } else {
+            fallback_candidates.push(candidate);
         }
     }
     if matched.is_empty() {
@@ -4297,6 +4326,7 @@ fn restrict_to_requested_chatgpt_account_id(
                 format!("account_id={}", safe_trace_atom(requested_account_id)),
             );
         }
+        return fallback_candidates;
     }
     matched
 }
@@ -4540,37 +4570,37 @@ fn compare_proxy_candidates(left: &ProxyCandidate, right: &ProxyCandidate) -> Or
         ordering => return ordering,
     }
 
+    match usage_window_used_percent(
+        left.usage
+            .as_ref()
+            .and_then(|usage| usage.one_week.as_ref()),
+    )
+    .total_cmp(&usage_window_used_percent(
+        right
+            .usage
+            .as_ref()
+            .and_then(|usage| usage.one_week.as_ref()),
+    )) {
+        Ordering::Equal => {}
+        ordering => return ordering,
+    }
+
+    match usage_window_used_percent(
+        left.usage
+            .as_ref()
+            .and_then(|usage| usage.five_hour.as_ref()),
+    )
+    .total_cmp(&usage_window_used_percent(
+        right
+            .usage
+            .as_ref()
+            .and_then(|usage| usage.five_hour.as_ref()),
+    )) {
+        Ordering::Equal => {}
+        ordering => return ordering,
+    }
+
     match is_free_plan(&right.plan_type).cmp(&is_free_plan(&left.plan_type)) {
-        Ordering::Equal => {}
-        ordering => return ordering,
-    }
-
-    match usage_window_used_percent(
-        left.usage
-            .as_ref()
-            .and_then(|usage| usage.one_week.as_ref()),
-    )
-    .total_cmp(&usage_window_used_percent(
-        right
-            .usage
-            .as_ref()
-            .and_then(|usage| usage.one_week.as_ref()),
-    )) {
-        Ordering::Equal => {}
-        ordering => return ordering,
-    }
-
-    match usage_window_used_percent(
-        left.usage
-            .as_ref()
-            .and_then(|usage| usage.five_hour.as_ref()),
-    )
-    .total_cmp(&usage_window_used_percent(
-        right
-            .usage
-            .as_ref()
-            .and_then(|usage| usage.five_hour.as_ref()),
-    )) {
         Ordering::Equal => {}
         ordering => return ordering,
     }
@@ -7012,6 +7042,7 @@ mod tests {
     use super::priority_service_tier_model_needing_catalog_check;
     use super::proxy_failure_details_from_upstream_response;
     use super::prune_api_proxy_usage_events;
+    use super::requested_account_id_matches_candidate;
     use super::resolve_proxy_request_body_limit_bytes_from_mib_value;
     use super::response_service_tier_for_trace;
     use super::restrict_to_requested_chatgpt_account_id;
@@ -7394,7 +7425,7 @@ mod tests {
     }
 
     #[test]
-    fn average_load_balance_preserves_free_plan_then_usage_order() {
+    fn average_load_balance_orders_by_usage_before_free_plan_tiebreak() {
         let candidates = vec![
             proxy_candidate_with_plan("free weekly 95", "e", Some(95.0), Some(95.0), false, "free"),
             proxy_candidate("weekly 20", "a", Some(20.0), Some(5.0), false),
@@ -7412,10 +7443,10 @@ mod tests {
         assert_eq!(
             candidate_labels(&ordered),
             vec![
-                "free weekly 95",
                 "weekly 10 five 5",
                 "weekly 10 five 90",
                 "weekly 20",
+                "free weekly 95",
                 "blocked low usage",
             ]
         );
@@ -8159,28 +8190,61 @@ mod tests {
     }
 
     #[test]
-    fn requested_account_header_does_not_fall_back_to_other_accounts() {
+    fn missing_requested_account_header_keeps_candidate_pool_for_load_balance() {
         let fallback = proxy_candidate("fallback", "fallback", Some(5.0), Some(20.0), false);
 
         let filtered =
-            restrict_to_requested_chatgpt_account_id(vec![fallback], Some("missing"), None);
+            restrict_to_requested_chatgpt_account_id(vec![fallback.clone()], Some("missing"), None);
 
-        assert!(filtered.is_empty());
+        assert_eq!(filtered.len(), 1);
+        assert_eq!(filtered[0].account_key, fallback.account_key);
     }
 
     #[test]
     fn requested_account_header_skips_sequential_target_persistence() {
         let mut headers = HeaderMap::new();
         headers.insert("chatgpt-account-id", "account-1".parse().unwrap());
+        let candidate = proxy_candidate("requested", "account-1", Some(5.0), Some(20.0), false);
 
-        assert!(!should_persist_sequential_target_for_request(&headers));
+        assert!(!should_persist_sequential_target_for_request(
+            &headers, &candidate
+        ));
+    }
+
+    #[test]
+    fn stale_requested_account_header_keeps_sequential_target_persistence() {
+        let mut headers = HeaderMap::new();
+        headers.insert("chatgpt-account-id", "missing".parse().unwrap());
+        let candidate = proxy_candidate("fallback", "fallback", Some(5.0), Some(20.0), false);
+
+        assert!(should_persist_sequential_target_for_request(
+            &headers, &candidate
+        ));
     }
 
     #[test]
     fn missing_requested_account_header_keeps_sequential_target_persistence() {
         let headers = HeaderMap::new();
+        let candidate = proxy_candidate("fallback", "fallback", Some(5.0), Some(20.0), false);
 
-        assert!(should_persist_sequential_target_for_request(&headers));
+        assert!(should_persist_sequential_target_for_request(
+            &headers, &candidate
+        ));
+    }
+
+    #[test]
+    fn requested_account_match_detects_only_enabled_candidate_pool_members() {
+        let requested = proxy_candidate("requested", "requested", Some(5.0), Some(20.0), false);
+        let fallback = proxy_candidate("fallback", "fallback", Some(5.0), Some(20.0), false);
+
+        assert!(requested_account_id_matches_candidate(
+            &[fallback.clone(), requested],
+            Some("requested")
+        ));
+        assert!(!requested_account_id_matches_candidate(
+            &[fallback],
+            Some("missing")
+        ));
     }
 
     #[test]
