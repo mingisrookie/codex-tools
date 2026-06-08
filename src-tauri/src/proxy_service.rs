@@ -106,6 +106,10 @@ const DEFAULT_PROXY_UPSTREAM_TIMEOUT_SECS: u64 = 1_800;
 const DEFAULT_PROXY_CONNECT_TIMEOUT_SECS: u64 = 30;
 const DEFAULT_PROXY_UPSTREAM_HEADERS_TIMEOUT_SECS: u64 = 60;
 const DEFAULT_PROXY_FAST_UPSTREAM_HEADERS_TIMEOUT_SECS: u64 = 5;
+const LARGE_PROXY_PAYLOAD_BYTES: usize = 1024 * 1024;
+const VERY_LARGE_PROXY_PAYLOAD_BYTES: usize = 2 * 1024 * 1024;
+const LARGE_PROXY_UPSTREAM_HEADERS_TIMEOUT_SECS: u64 = 20;
+const VERY_LARGE_PROXY_UPSTREAM_HEADERS_TIMEOUT_SECS: u64 = 45;
 const MAX_PROXY_CONNECT_RESPONSE_BYTES: usize = 16 * 1024;
 const PROXY_REQUEST_BODY_LIMIT_MIB_ENV_VAR: &str = "CODEX_TOOLS_PROXY_MAX_BODY_MIB";
 const RESPONSES_WEBSOCKET_EXPERIMENT_ENV_VAR: &str = "CODEX_TOOLS_RESPONSES_WEBSOCKET_EXPERIMENT";
@@ -289,6 +293,7 @@ type UpstreamByteStream = Pin<Box<dyn Stream<Item = Result<Bytes, String>> + Sen
 #[derive(Clone)]
 struct ResponsesTrace {
     id: String,
+    endpoint: String,
     log_path: PathBuf,
     data_dir: PathBuf,
     started_at: Instant,
@@ -315,15 +320,16 @@ enum SseTerminalOutcome {
 }
 
 impl ResponsesTrace {
-    fn new(request_bytes: usize, data_dir: &Path) -> Self {
+    fn new(endpoint: &str, request_bytes: usize, data_dir: &Path) -> Self {
         Self {
             id: uuid::Uuid::new_v4().to_string(),
+            endpoint: endpoint.to_string(),
             log_path: data_dir.join("logs").join("api-proxy-trace.log"),
             data_dir: data_dir.to_path_buf(),
             started_at: Instant::now(),
             request_bytes,
             downstream_stream: Arc::new(RwLock::new(None)),
-            dashboard_id: dashboard_metrics::begin_in_flight_request("/v1/responses", None),
+            dashboard_id: dashboard_metrics::begin_in_flight_request(endpoint, None),
             model: Arc::new(RwLock::new(None)),
             account_label: Arc::new(RwLock::new(None)),
             upstream_headers_ms: Arc::new(RwLock::new(None)),
@@ -490,7 +496,7 @@ impl ResponsesTrace {
         let first_chunk_ms = self.first_chunk_ms.read().ok().and_then(|value| *value);
         let event = DashboardMetricEvent {
             finished_at: now_unix_seconds(),
-            endpoint: "/v1/responses".to_string(),
+            endpoint: self.endpoint.clone(),
             model: self.model.read().ok().and_then(|value| value.clone()),
             account_label: self
                 .account_label
@@ -1461,23 +1467,94 @@ async fn chat_completions_handler(
             Err(message) => return invalid_request_response(&message),
         };
 
+    let trace = if downstream_stream {
+        None
+    } else {
+        let trace = ResponsesTrace::new(
+            "/v1/chat/completions",
+            body.len(),
+            &context.storage.data_dir,
+        );
+        trace.log("request_received", "route=/v1/chat/completions");
+        trace.log(
+            "inbound_request",
+            format_service_tier_trace_details(
+                upstream_payload.get("model").and_then(Value::as_str),
+                &service_tier_for_trace(&upstream_payload),
+                None,
+            ),
+        );
+        trace.set_model(
+            upstream_payload
+                .get("model")
+                .and_then(Value::as_str)
+                .map(ToString::to_string),
+        );
+        trace.set_downstream_stream(false);
+        trace.log("upstream_request_start", "");
+        Some(trace)
+    };
+
     let upstream = match send_codex_request_over_candidates(
         &context,
         "/v1/chat/completions",
         &headers,
         &upstream_payload,
-        None,
+        trace.as_ref(),
     )
     .await
     {
         Ok(value) => value,
-        Err(response) => return response,
+        Err(response) => {
+            if let Some(trace) = trace.as_ref() {
+                let status = response.status();
+                let (parts, body) = response.into_parts();
+                let body = to_bytes(body, DEFAULT_PROXY_REQUEST_BODY_LIMIT_BYTES)
+                    .await
+                    .unwrap_or_default();
+                let failure = proxy_failure_details_from_upstream_response(status, &body);
+                trace.log(
+                    "upstream_request_failed",
+                    format_proxy_failure_details(&failure),
+                );
+                trace.set_failure_context(
+                    failure.failure_category.clone(),
+                    Some(failure.failure_brief.clone()),
+                );
+                trace.finish(Some(status.as_u16()), Some(&failure.error_kind));
+                return Response::from_parts(parts, Body::from(body));
+            }
+            return response;
+        }
     };
 
     let (candidate, upstream_response) = upstream;
+    if let Some(trace) = trace.as_ref() {
+        trace.set_account_label(Some(candidate.label.clone()));
+        trace.set_upstream_headers_now();
+        trace.log(
+            "upstream_headers_received",
+            format!(
+                "candidate_label={} status={} downstream_stream={downstream_stream}",
+                truncate_for_error(&candidate.label, 80),
+                upstream_response.status(),
+            ),
+        );
+    }
     let persist_sequential_target =
         should_persist_sequential_target_for_request(&headers, &candidate);
+    let proxy_target_update_started = Instant::now();
     update_proxy_target(&context, &candidate, persist_sequential_target).await;
+    if let Some(trace) = trace.as_ref() {
+        trace.log(
+            "proxy_target_updated",
+            format!(
+                "persist_sequential={} elapsed_ms={}",
+                persist_sequential_target,
+                proxy_target_update_started.elapsed().as_millis()
+            ),
+        );
+    }
     update_proxy_error(&context, None).await;
     let usage_metadata =
         api_proxy_usage_metadata(&candidate, "/v1/chat/completions", &upstream_payload);
@@ -1485,22 +1562,39 @@ async fn chat_completions_handler(
     if downstream_stream {
         build_chat_streaming_response(upstream_response, context.storage.clone(), usage_metadata)
     } else {
-        let (upstream_headers, upstream_body) = match upstream_response.into_bytes().await {
-            Ok(value) => value,
-            Err(error) => {
-                let message = format!("读取 Codex 上游响应失败: {error}");
-                update_proxy_error(&context, Some(message.clone())).await;
-                return json_error_response(StatusCode::BAD_GATEWAY, &message);
-            }
-        };
-
-        let completed = match extract_completed_response_from_sse(&upstream_body) {
-            Ok(value) => value,
-            Err(message) => {
-                update_proxy_error(&context, Some(message.clone())).await;
-                return json_error_response(StatusCode::BAD_GATEWAY, &message);
-            }
-        };
+        let trace = trace
+            .as_ref()
+            .expect("non-stream chat completions should have a trace");
+        trace.log("non_stream_sse_read_start", "");
+        let (upstream_headers, completed) =
+            match read_completed_response_from_sse_stream(upstream_response, Some(trace)).await {
+                Ok(value) => value,
+                Err(error) => {
+                    let message = format!("读取 Codex 上游响应失败: {error}");
+                    trace.log(
+                        "non_stream_sse_read_failed",
+                        format!("error={}", truncate_for_error(&error, 200)),
+                    );
+                    trace.set_failure_context(
+                        Some("upstream_sse_read_failed".to_string()),
+                        Some(truncate_for_error(&error, 200)),
+                    );
+                    trace.finish(
+                        Some(StatusCode::BAD_GATEWAY.as_u16()),
+                        Some("non_stream_sse_read_failed"),
+                    );
+                    update_proxy_error(&context, Some(message.clone())).await;
+                    return json_error_response(StatusCode::BAD_GATEWAY, &message);
+                }
+            };
+        trace.log(
+            "non_stream_actual_tier",
+            format_service_tier_trace_details(
+                completed.get("model").and_then(Value::as_str),
+                &response_service_tier_for_trace(&completed),
+                None,
+            ),
+        );
         record_api_proxy_tokens_from_response(&context.storage, &usage_metadata, &completed).await;
 
         let body =
@@ -1508,11 +1602,29 @@ async fn chat_completions_handler(
                 Ok(bytes) => Bytes::from(bytes),
                 Err(error) => {
                     let message = format!("序列化聊天响应失败: {error}");
+                    trace.log(
+                        "non_stream_serialize_failed",
+                        format!("error={}", truncate_for_error(&error.to_string(), 200)),
+                    );
+                    trace.set_failure_context(
+                        Some("proxy_serialize_failed".to_string()),
+                        Some(truncate_for_error(&error.to_string(), 200)),
+                    );
+                    trace.finish(
+                        Some(StatusCode::BAD_GATEWAY.as_u16()),
+                        Some("non_stream_serialize_failed"),
+                    );
                     update_proxy_error(&context, Some(message.clone())).await;
                     return json_error_response(StatusCode::BAD_GATEWAY, &message);
                 }
             };
 
+        trace.log(
+            "non_stream_response_ready",
+            format!("body_bytes={}", body.len()),
+        );
+        trace.set_tokens_from_usage(completed.get("usage"));
+        trace.finish(Some(StatusCode::OK.as_u16()), None);
         build_json_proxy_response(StatusCode::OK, &upstream_headers, body)
     }
 }
@@ -1522,7 +1634,7 @@ async fn responses_handler(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
-    let trace = ResponsesTrace::new(body.len(), &context.storage.data_dir);
+    let trace = ResponsesTrace::new("/v1/responses", body.len(), &context.storage.data_dir);
     trace.log("request_received", "route=/v1/responses");
 
     if let Some(response) = ensure_authorized(&headers, &context.api_key) {
@@ -1662,51 +1774,28 @@ async fn responses_handler(
             usage_metadata,
         )
     } else {
-        trace.log("non_stream_body_read_start", "");
-        let (upstream_headers, upstream_body) = match upstream_response.into_bytes().await {
-            Ok(value) => value,
-            Err(error) => {
-                trace.log(
-                    "non_stream_body_read_failed",
-                    format!("error={}", truncate_for_error(&error, 200)),
-                );
-                trace.set_failure_context(
-                    Some("upstream_body_read_failed".to_string()),
-                    Some(truncate_for_error(&error, 200)),
-                );
-                trace.finish(
-                    Some(StatusCode::BAD_GATEWAY.as_u16()),
-                    Some("non_stream_body_read_failed"),
-                );
-                let message = format!("读取 Codex 上游响应失败: {error}");
-                update_proxy_error(&context, Some(message.clone())).await;
-                return json_error_response(StatusCode::BAD_GATEWAY, &message);
-            }
-        };
-        trace.log(
-            "non_stream_body_read_finished",
-            format!("upstream_bytes={}", upstream_body.len()),
-        );
-
-        let completed = match extract_completed_response_from_sse(&upstream_body) {
-            Ok(value) => value,
-            Err(message) => {
-                trace.log(
-                    "non_stream_extract_failed",
-                    format!("error={}", truncate_for_error(&message, 200)),
-                );
-                trace.set_failure_context(
-                    Some("upstream_body_extract_failed".to_string()),
-                    Some(truncate_for_error(&message, 200)),
-                );
-                trace.finish(
-                    Some(StatusCode::BAD_GATEWAY.as_u16()),
-                    Some("non_stream_extract_failed"),
-                );
-                update_proxy_error(&context, Some(message.clone())).await;
-                return json_error_response(StatusCode::BAD_GATEWAY, &message);
-            }
-        };
+        trace.log("non_stream_sse_read_start", "");
+        let (upstream_headers, completed) =
+            match read_completed_response_from_sse_stream(upstream_response, Some(&trace)).await {
+                Ok(value) => value,
+                Err(error) => {
+                    trace.log(
+                        "non_stream_sse_read_failed",
+                        format!("error={}", truncate_for_error(&error, 200)),
+                    );
+                    trace.set_failure_context(
+                        Some("upstream_sse_read_failed".to_string()),
+                        Some(truncate_for_error(&error, 200)),
+                    );
+                    trace.finish(
+                        Some(StatusCode::BAD_GATEWAY.as_u16()),
+                        Some("non_stream_sse_read_failed"),
+                    );
+                    let message = format!("读取 Codex 上游响应失败: {error}");
+                    update_proxy_error(&context, Some(message.clone())).await;
+                    return json_error_response(StatusCode::BAD_GATEWAY, &message);
+                }
+            };
         trace.log(
             "non_stream_actual_tier",
             format_service_tier_trace_details(
@@ -3849,7 +3938,18 @@ where
         .map_err(|error| format!("请求 Codex 上游失败 {upstream_url}: {error}"))
 }
 
+#[cfg(test)]
 fn upstream_headers_timeout_for_payload(payload: &Value) -> Duration {
+    let payload_bytes = serde_json::to_vec(payload)
+        .map(|bytes| bytes.len())
+        .unwrap_or(0);
+    upstream_headers_timeout_for_serialized_payload(payload, payload_bytes)
+}
+
+fn upstream_headers_timeout_for_serialized_payload(
+    payload: &Value,
+    payload_bytes: usize,
+) -> Duration {
     if payload
         .get("service_tier")
         .and_then(Value::as_str)
@@ -3863,6 +3963,10 @@ fn upstream_headers_timeout_for_payload(payload: &Value) -> Duration {
             .is_some_and(|effort| effort == "xhigh")
         {
             Duration::from_secs(DEFAULT_PROXY_UPSTREAM_HEADERS_TIMEOUT_SECS)
+        } else if payload_bytes >= VERY_LARGE_PROXY_PAYLOAD_BYTES {
+            Duration::from_secs(VERY_LARGE_PROXY_UPSTREAM_HEADERS_TIMEOUT_SECS)
+        } else if payload_bytes >= LARGE_PROXY_PAYLOAD_BYTES {
+            Duration::from_secs(LARGE_PROXY_UPSTREAM_HEADERS_TIMEOUT_SECS)
         } else {
             Duration::from_secs(DEFAULT_PROXY_FAST_UPSTREAM_HEADERS_TIMEOUT_SECS)
         }
@@ -3954,9 +4058,10 @@ async fn forward_codex_request_with_candidate(
             .header("Connection", "Keep-Alive");
     }
 
+    let serialized_len = serialized.len();
     let response = wait_for_upstream_headers(
         request.body(serialized).send(),
-        upstream_headers_timeout_for_payload(payload),
+        upstream_headers_timeout_for_serialized_payload(payload, serialized_len),
         &upstream_url,
     )
     .await?;
@@ -4238,10 +4343,12 @@ fn order_proxy_candidates_for_request(
         .iter()
         .position(|candidate| candidate.account_key == current_key)
     {
-        if can_reuse_sequential_candidate(
-            &candidates[current_index],
-            load_balance.sequential_five_hour_limit_percent,
-        ) {
+        if same_plan_priority(&candidates[current_index], &candidates[0])
+            && can_reuse_sequential_candidate(
+                &candidates[current_index],
+                load_balance.sequential_five_hour_limit_percent,
+            )
+        {
             let current = candidates.remove(current_index);
             candidates.insert(0, current);
             return candidates;
@@ -4570,6 +4677,11 @@ fn compare_proxy_candidates(left: &ProxyCandidate, right: &ProxyCandidate) -> Or
         ordering => return ordering,
     }
 
+    match is_free_plan(&left.plan_type).cmp(&is_free_plan(&right.plan_type)) {
+        Ordering::Equal => {}
+        ordering => return ordering,
+    }
+
     match usage_window_used_percent(
         left.usage
             .as_ref()
@@ -4596,11 +4708,6 @@ fn compare_proxy_candidates(left: &ProxyCandidate, right: &ProxyCandidate) -> Or
             .as_ref()
             .and_then(|usage| usage.five_hour.as_ref()),
     )) {
-        Ordering::Equal => {}
-        ordering => return ordering,
-    }
-
-    match is_free_plan(&right.plan_type).cmp(&is_free_plan(&left.plan_type)) {
         Ordering::Equal => {}
         ordering => return ordering,
     }
@@ -4608,6 +4715,10 @@ fn compare_proxy_candidates(left: &ProxyCandidate, right: &ProxyCandidate) -> Or
     left.label
         .cmp(&right.label)
         .then_with(|| left.account_key.cmp(&right.account_key))
+}
+
+fn same_plan_priority(left: &ProxyCandidate, right: &ProxyCandidate) -> bool {
+    is_free_plan(&left.plan_type) == is_free_plan(&right.plan_type)
 }
 
 fn is_free_plan(plan_type: &Option<String>) -> bool {
@@ -6131,19 +6242,198 @@ fn serialize_sse_event(event: Option<&str>, data: &str) -> Bytes {
     Bytes::from(serialized)
 }
 
+#[derive(Default)]
+struct CompletedResponseSseAccumulator {
+    first_error: Option<String>,
+    output_text: String,
+    output_items: Vec<Value>,
+}
+
+impl CompletedResponseSseAccumulator {
+    fn observe_event(&mut self, event: &SseEvent) -> Option<Result<Value, String>> {
+        let parsed = match serde_json::from_str::<Value>(&event.data) {
+            Ok(value) => value,
+            Err(_) => return None,
+        };
+
+        collect_output_text_delta(&parsed, &mut self.output_text);
+        collect_completed_output_item(&parsed, &mut self.output_items);
+        if let Some(response) = response_completed_from_value(&parsed) {
+            let response = ensure_completed_response_output_items(response, &self.output_items);
+            return Some(Ok(ensure_completed_response_output(
+                response,
+                &self.output_text,
+            )));
+        }
+
+        if let Some(message) = response_error_message_from_value(&parsed) {
+            if self.first_error.is_none() {
+                self.first_error = Some(message.clone());
+            }
+            if sse_terminal_outcome(event).is_some() {
+                return Some(Err(message));
+            }
+        }
+
+        match sse_terminal_outcome(event) {
+            Some(SseTerminalOutcome::Failed) => {
+                Some(Err("上游返回 response.failed 终止事件".to_string()))
+            }
+            Some(SseTerminalOutcome::Incomplete) => {
+                let event_type =
+                    sse_event_type(event).unwrap_or_else(|| "response.incomplete".to_string());
+                Some(Err(format!("上游返回 {event_type} 终止事件")))
+            }
+            Some(SseTerminalOutcome::Completed) => {
+                Some(Err("Codex 完成事件缺少 response 字段".to_string()))
+            }
+            None => None,
+        }
+    }
+
+    fn finish(self) -> Result<Value, String> {
+        if let Some(message) = self.first_error {
+            return Err(message);
+        }
+
+        Err("未在 Codex SSE 中找到 response.completed 事件".to_string())
+    }
+}
+
+async fn read_completed_response_from_sse_stream(
+    upstream: CodexUpstreamResponse,
+    trace: Option<&ResponsesTrace>,
+) -> Result<(HeaderMap, Value), String> {
+    let (upstream_headers, mut upstream_stream) = upstream.into_stream();
+    let mut decoder = SseDecoder::default();
+    let mut accumulator = CompletedResponseSseAccumulator::default();
+    let mut saw_first_chunk = false;
+    let mut chunk_count: u64 = 0;
+    let mut event_count: u64 = 0;
+    let mut upstream_bytes: usize = 0;
+
+    while let Some(chunk) = upstream_stream.next().await {
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(error) => {
+                if let Some(trace) = trace {
+                    trace.log(
+                        "upstream_stream_error",
+                        format!("error={}", truncate_for_error(&error, 200)),
+                    );
+                }
+                return Err(error);
+            }
+        };
+
+        chunk_count += 1;
+        upstream_bytes += chunk.len();
+        if !saw_first_chunk {
+            saw_first_chunk = true;
+            if let Some(trace) = trace {
+                trace.set_first_chunk_now();
+                trace.log(
+                    "first_upstream_chunk",
+                    format!("chunk_bytes={}", chunk.len()),
+                );
+            }
+        }
+
+        for event in decoder.push(&chunk) {
+            event_count += 1;
+            let terminal_outcome = observe_sse_event_for_trace(
+                trace,
+                &event,
+                chunk_count,
+                event_count,
+                upstream_bytes,
+            );
+            if let Some(result) = accumulator.observe_event(&event) {
+                return result.map(|response| (upstream_headers, response));
+            }
+            if let Some(outcome) = terminal_outcome {
+                return Err(terminal_sse_error_message(outcome, &event));
+            }
+        }
+    }
+
+    for event in decoder.finish() {
+        event_count += 1;
+        let terminal_outcome =
+            observe_sse_event_for_trace(trace, &event, chunk_count, event_count, upstream_bytes);
+        if let Some(result) = accumulator.observe_event(&event) {
+            return result.map(|response| (upstream_headers, response));
+        }
+        if let Some(outcome) = terminal_outcome {
+            return Err(terminal_sse_error_message(outcome, &event));
+        }
+    }
+
+    if let Some(trace) = trace {
+        trace.log(
+            "upstream_stream_end",
+            format!("chunks={chunk_count} events={event_count} upstream_bytes={upstream_bytes}"),
+        );
+    }
+    accumulator
+        .finish()
+        .map(|response| (upstream_headers, response))
+}
+
+fn observe_sse_event_for_trace(
+    trace: Option<&ResponsesTrace>,
+    event: &SseEvent,
+    chunk_count: u64,
+    event_count: u64,
+    upstream_bytes: usize,
+) -> Option<SseTerminalOutcome> {
+    let trace = trace?;
+    let event_type = sse_event_type(event).unwrap_or_else(|| "unknown".to_string());
+    let terminal_outcome = trace.observe_sse_event(event);
+    if event_count == 1 || event_count % 100 == 0 {
+        trace.log(
+            "sse_progress",
+            format!(
+                "events={event_count} chunks={chunk_count} upstream_bytes={upstream_bytes} last_sse_event={event_type}",
+            ),
+        );
+    }
+    if terminal_outcome.is_some() {
+        trace.log(
+            "sse_terminal_event",
+            format!(
+                "event={event_type} actual_service_tier={} chunks={chunk_count} events={event_count} upstream_bytes={upstream_bytes}",
+                completed_event_service_tier_for_trace(event),
+            ),
+        );
+    }
+    terminal_outcome
+}
+
+fn terminal_sse_error_message(outcome: SseTerminalOutcome, event: &SseEvent) -> String {
+    match outcome {
+        SseTerminalOutcome::Completed => "Codex 完成事件缺少 response 字段".to_string(),
+        SseTerminalOutcome::Failed => response_error_message_from_sse_event(event)
+            .unwrap_or_else(|| "上游返回 response.failed 终止事件".to_string()),
+        SseTerminalOutcome::Incomplete => {
+            let event_type =
+                sse_event_type(event).unwrap_or_else(|| "response.incomplete".to_string());
+            response_error_message_from_sse_event(event)
+                .unwrap_or_else(|| format!("上游返回 {event_type} 终止事件"))
+        }
+    }
+}
+
+fn response_error_message_from_sse_event(event: &SseEvent) -> Option<String> {
+    serde_json::from_str::<Value>(&event.data)
+        .ok()
+        .and_then(|value| response_error_message_from_value(&value))
+}
+
 fn extract_completed_response_from_sse(bytes: &[u8]) -> Result<Value, String> {
     if let Ok(value) = serde_json::from_slice::<Value>(bytes) {
-        if value
-            .get("type")
-            .and_then(Value::as_str)
-            .map(|value| value == "response.completed")
-            .unwrap_or(false)
-        {
-            return value
-                .get("response")
-                .cloned()
-                .map(|response| ensure_completed_response_output(response, ""))
-                .ok_or_else(|| "Codex 响应缺少 response 字段".to_string());
+        if let Some(response) = response_completed_from_value(&value) {
+            return Ok(ensure_completed_response_output(response, ""));
         }
         if let Some(message) = response_error_message_from_value(&value) {
             return Err(message);
@@ -6151,45 +6441,25 @@ fn extract_completed_response_from_sse(bytes: &[u8]) -> Result<Value, String> {
     }
 
     let mut decoder = SseDecoder::default();
-    let mut first_error = None::<String>;
-    let mut output_text = String::new();
-    let mut output_items = Vec::new();
+    let mut accumulator = CompletedResponseSseAccumulator::default();
     for event in decoder.push(bytes) {
-        if let Ok(parsed) = serde_json::from_str::<Value>(&event.data) {
-            collect_output_text_delta(&parsed, &mut output_text);
-            collect_completed_output_item(&parsed, &mut output_items);
-            if let Some(response) = response_completed_from_value(&parsed) {
-                let response = ensure_completed_response_output_items(response, &output_items);
-                return Ok(ensure_completed_response_output(response, &output_text));
-            }
-            if first_error.is_none() {
-                first_error = response_error_message_from_value(&parsed);
-            }
+        if let Some(result) = accumulator.observe_event(&event) {
+            return result;
         }
     }
     for event in decoder.finish() {
-        if let Ok(parsed) = serde_json::from_str::<Value>(&event.data) {
-            collect_output_text_delta(&parsed, &mut output_text);
-            collect_completed_output_item(&parsed, &mut output_items);
-            if let Some(response) = response_completed_from_value(&parsed) {
-                let response = ensure_completed_response_output_items(response, &output_items);
-                return Ok(ensure_completed_response_output(response, &output_text));
-            }
-            if first_error.is_none() {
-                first_error = response_error_message_from_value(&parsed);
-            }
+        if let Some(result) = accumulator.observe_event(&event) {
+            return result;
         }
     }
-
-    if let Some(message) = first_error {
-        return Err(message);
-    }
-
-    Err("未在 Codex SSE 中找到 response.completed 事件".to_string())
+    accumulator.finish()
 }
 
 fn response_completed_from_value(parsed: &Value) -> Option<Value> {
-    if parsed.get("type").and_then(Value::as_str) != Some("response.completed") {
+    if !matches!(
+        parsed.get("type").and_then(Value::as_str),
+        Some("response.completed" | "response.done")
+    ) {
         return None;
     }
     parsed.get("response").cloned()
@@ -7042,6 +7312,7 @@ mod tests {
     use super::priority_service_tier_model_needing_catalog_check;
     use super::proxy_failure_details_from_upstream_response;
     use super::prune_api_proxy_usage_events;
+    use super::read_completed_response_from_sse_stream;
     use super::requested_account_id_matches_candidate;
     use super::resolve_proxy_request_body_limit_bytes_from_mib_value;
     use super::response_service_tier_for_trace;
@@ -7070,6 +7341,7 @@ mod tests {
     use super::websocket_upstream_close_error;
     use super::ApiProxyUsageEvent;
     use super::ChatStreamState;
+    use super::CodexUpstreamResponse;
     use super::ImageMultipartRequest;
     use super::ProxyCandidate;
     use super::ProxyContext;
@@ -7088,6 +7360,7 @@ mod tests {
     use crate::models::UsageSnapshot;
     use crate::models::UsageWindow;
     use crate::state::ApiProxyRuntimeSnapshot;
+    use async_stream::stream;
     use axum::body::Bytes;
     use axum::http::HeaderMap;
     use reqwest::StatusCode;
@@ -7235,7 +7508,7 @@ mod tests {
     }
 
     #[test]
-    fn proxy_candidates_prefer_free_accounts_before_paid_accounts() {
+    fn proxy_candidates_prefer_paid_accounts_before_free_accounts() {
         let mut candidates = vec![
             candidate("free", "free", 0.0, false),
             candidate("blocked-team", "team", 0.0, true),
@@ -7244,9 +7517,25 @@ mod tests {
 
         candidates.sort_by(compare_proxy_candidates);
 
-        assert_eq!(candidates[0].label, "free");
-        assert_eq!(candidates[1].label, "plus");
+        assert_eq!(candidates[0].label, "plus");
+        assert_eq!(candidates[1].label, "free");
         assert_eq!(candidates[2].label, "blocked-team");
+    }
+
+    #[test]
+    fn sequential_load_balance_does_not_reuse_free_current_when_paid_is_available() {
+        let candidates = vec![
+            proxy_candidate_with_plan("plus", "a", Some(20.0), Some(20.0), false, "plus"),
+            proxy_candidate_with_plan("current free", "b", Some(5.0), Some(10.0), false, "free"),
+        ];
+
+        let ordered = order_proxy_candidates_for_request(
+            candidates,
+            load_balance_config(ApiProxyLoadBalanceMode::Sequential, 80.0),
+            Some("b"),
+        );
+
+        assert_eq!(candidate_labels(&ordered), vec!["plus", "current free"]);
     }
 
     #[test]
@@ -8115,6 +8404,26 @@ mod tests {
                 "service_tier": "priority"
             })),
             Duration::from_secs(DEFAULT_PROXY_UPSTREAM_HEADERS_TIMEOUT_SECS)
+        );
+    }
+
+    #[test]
+    fn large_priority_requests_use_larger_header_timeout() {
+        assert_eq!(
+            upstream_headers_timeout_for_payload(&json!({
+                "model": "gpt-5.5",
+                "input": "x".repeat(1_200_000),
+                "service_tier": "priority"
+            })),
+            Duration::from_secs(20)
+        );
+        assert_eq!(
+            upstream_headers_timeout_for_payload(&json!({
+                "model": "gpt-5.5",
+                "input": "x".repeat(2_200_000),
+                "service_tier": "priority"
+            })),
+            Duration::from_secs(45)
         );
     }
 
@@ -9056,6 +9365,56 @@ data: {"type":"response.completed","response":{"id":"resp_123","created_at":1,"m
         assert_eq!(
             response.get("output_text").and_then(Value::as_str),
             Some("2")
+        );
+    }
+
+    #[tokio::test]
+    async fn non_stream_completed_response_returns_without_waiting_for_upstream_eof() {
+        let body = Bytes::from(format!(
+            "event: response.completed\ndata: {}\n\n",
+            json!({
+                "type": "response.completed",
+                "response": {
+                    "id": "resp_early",
+                    "created_at": 1,
+                    "model": "gpt-5",
+                    "status": "completed",
+                    "output": [{
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{
+                            "type": "output_text",
+                            "text": "OK"
+                        }]
+                    }]
+                }
+            })
+        ));
+        let upstream = CodexUpstreamResponse::WebSocket {
+            headers: HeaderMap::new(),
+            stream: Box::pin(stream! {
+                yield Ok(body);
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                yield Ok(Bytes::from_static(b"event: response.done\ndata: {\"type\":\"response.done\"}\n\n"));
+            }),
+        };
+
+        let completed = tokio::time::timeout(
+            Duration::from_millis(200),
+            read_completed_response_from_sse_stream(upstream, None),
+        )
+        .await
+        .expect("terminal response should be returned before upstream EOF")
+        .expect("response.completed should parse")
+        .1;
+
+        assert_eq!(
+            completed.get("id").and_then(Value::as_str),
+            Some("resp_early")
+        );
+        assert_eq!(
+            completed.get("output_text").and_then(Value::as_str),
+            Some("OK")
         );
     }
 

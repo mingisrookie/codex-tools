@@ -182,7 +182,7 @@ Tauri 命令入口在：
 - 转为 Codex `responses` 请求
 - 上游始终按 SSE 模式请求
 - 如果下游请求 `stream: true`，本地再把上游 SSE 转成 OpenAI ChatCompletions SSE
-- 如果下游请求 `stream: false`，本地会先收完整个 SSE，再拼成普通 JSON 返回
+- 如果下游请求 `stream: false`，本地边读上游 SSE 边解码；一旦收到 `response.completed` / `response.done` 终止事件并拿到完整 `response`，立即拼成普通 JSON 返回，不等待上游连接自然 EOF
 
 ### 6.4 `POST /v1/responses`
 
@@ -195,7 +195,7 @@ Tauri 命令入口在：
 - 请求体不做大的协议改写，只做必要归一化
 - 上游仍然统一发到 Codex `responses`
 - `stream: true` 时近似透传 SSE
-- `stream: false` 时从 SSE 中提取 `response.completed`，返回标准 JSON
+- `stream: false` 时同样边读 SSE 边提取终止事件，拿到 `response.completed` / `response.done` 后立即返回标准 JSON，不等待完整连接关闭
 
 ### 6.5 `POST /v1/images/*`
 
@@ -265,17 +265,17 @@ Tauri 命令入口在：
 排序规则：
 
 1. 跳过已停用账号，阻塞或健康异常账号靠后
-2. `free` 计划优先
+2. `plus` / `team` / `pro` 等非 `free` 计划优先，`free` 作为兜底
 3. 同类账号按 `1week`、`5h` 已用百分比从低到高排序
 4. 最后按标签名和账号 key 保持稳定排序
-5. 顺序负载均衡模式会在上述排序基础上优先复用当前账号，直到它达到配置的 `5h` 使用阈值
+5. 顺序负载均衡模式会在上述排序基础上优先复用当前同级账号，直到它达到配置的 `5h` 使用阈值；不会让当前 `free` 账号压过可用的非 `free` 账号
 
 也就是：
 
 - 已停用账号不会参与反代，阻塞账号不会抢在正常账号前面
-- `free` 计划仍会优先于其他计划
+- 非 `free` 计划优先，`free` 计划只在非 `free` 不可用或耗尽时兜底
 - 在同一类候选中，优先挑健康且更有余量的账号
-- 顺序负载均衡避免长期压到同一个账号，但不会删除基础健康/计划/余量排序
+- 顺序负载均衡避免长期压到同一个账号，但不会删除基础健康/计划/余量排序，也不会跨计划等级粘住低优先级账号
 - 账号用量自动刷新默认每 1 分钟一轮，可在账号界面按分钟调整；手动刷新按钮仍会立即请求
 
 对应逻辑：
@@ -399,7 +399,7 @@ OpenAI 里的：
 如果下游本来就是 Responses 客户端：
 
 - `stream: true` 时，基本按 SSE 透回去
-- `stream: false` 时，从完整 SSE 中提取 `response.completed`
+- `stream: false` 时，从上游 SSE 流中即时提取 `response.completed` / `response.done`，遇到终止事件后直接返回，不等 EOF
 
 ### 13.2 `POST /v1/chat/completions`
 
@@ -426,14 +426,16 @@ OpenAI 里的：
 如果下游 `stream: false`：
 
 1. 本地仍然向上游请求 SSE
-2. 读完整个 SSE
-3. 找到 `response.completed`
+2. 边读边用 SSE decoder 解析事件
+3. 一遇到 `response.completed` / `response.done` 并拿到完整 `response` 就停止继续等待上游 EOF
 4. 从 `response.output` 里提取：
    - assistant 文本
    - reasoning summary
    - tool calls
    - usage
-5. 拼成一个普通的 OpenAI ChatCompletions JSON
+5. 拼成一个普通的 OpenAI ChatCompletions JSON；如果先遇到 `response.failed` / `response.incomplete` / `response.cancelled`，按上游终止错误返回
+
+非流式 `/v1/chat/completions` 与 `/v1/responses` 都会写入 dashboard metrics / `api-proxy-trace.log`，关键阶段包括 `first_upstream_chunk`、`sse_terminal_event`、`non_stream_response_ready`。这里的总耗时以终止事件命中为准，不再把上游长连接后续 EOF 等待计入正常响应路径。
 
 ## 14. 失败重试与自动切号
 
@@ -468,6 +470,16 @@ OpenAI 里的：
 - 候选账号 cooldown 使用失败发生时的当前时间计算，不能复用请求刚开始挑选账号时的旧时间，避免长时间等待上游响应头后冷却窗口已经落在过去
 - 顺序模式仍会同步更新运行时当前账号，保证面板和后续请求立即看到新目标
 - `accounts.json` 中的顺序账号目标只在目标账号变化时持久化，且持久化走后台任务，避免本地文件锁或磁盘写入阻塞首字路径
+
+### 14.4 上游响应头超时
+
+`service_tier: priority` 的普通请求默认用较短响应头超时，避免坏账号或上游卡顿拖慢切号；但大上下文请求会按序列化后的请求体大小放宽：
+
+- 小于 `1 MiB`：`5s`
+- `1 MiB` 到 `2 MiB`：`20s`
+- 大于等于 `2 MiB`：`45s`
+
+`reasoning.effort: xhigh` 或非 priority 请求继续使用常规 `60s` 响应头超时。
 
 ## 15. 失败分类
 
@@ -613,7 +625,7 @@ curl http://127.0.0.1:8787/v1/chat/completions \
 4. 强制补 `store: false`
 5. 带着账号 `access_token + account_id` 去打上游
 6. 上游返回 SSE
-7. 本地抽取 `response.completed`
+7. 本地边读 SSE 边抽取 `response.completed`，命中终止事件后立即返回
 8. 转成 OpenAI ChatCompletions JSON
 9. 返回类似：
 
