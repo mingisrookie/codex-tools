@@ -117,6 +117,27 @@ function formatRequestPhase(phase: string): string {
   return phaseLabels[phase] ?? "未知阶段";
 }
 
+function formatEventStatus(event: DashboardMetricEvent): string {
+  return String(event.statusCode ?? event.errorKind ?? "--");
+}
+
+function formatEventErrorDetails(event: DashboardMetricEvent): string {
+  const parts: string[] = [];
+  if (event.statusCode && event.statusCode >= 400) {
+    parts.push(`HTTP ${event.statusCode}`);
+  }
+  if (event.errorKind) {
+    parts.push(event.errorKind);
+  }
+  if (event.failureCategory) {
+    parts.push(event.failureCategory);
+  }
+  if (event.failureBrief) {
+    parts.push(event.failureBrief);
+  }
+  return parts.join(" · ");
+}
+
 function DashboardMetaItem({
   label,
   value,
@@ -289,24 +310,31 @@ function EventTable({
                 <th>流式</th>
                 <th>总耗时</th>
                 <th>首字节</th>
+                <th>错误详情</th>
                 <th>令牌</th>
               </tr>
             </thead>
             <tbody>
-              {events.map((event, index) => (
-                <tr key={`${event.finishedAt}-${event.endpoint}-${index}`}>
-                  <td>{formatEventTime(event.finishedAt)}</td>
-                  <td title={event.endpoint}>{event.endpoint}</td>
-                  <td title={event.model ?? ""}>{event.model ?? "--"}</td>
-                  <td title={event.accountLabel ?? ""}>{event.accountLabel ?? "--"}</td>
-                  <td>{event.statusCode ?? event.errorKind ?? "--"}</td>
-                  <td>{formatBytes(event.requestBytes)}</td>
-                  <td>{formatStreamMode(event.downstreamStream)}</td>
-                  <td>{formatMs(event.totalMs)}</td>
-                  <td>{formatMs(event.firstChunkMs)}</td>
-                  <td>{formatTokenCount(event.tokens.totalTokens)}</td>
-                </tr>
-              ))}
+              {events.map((event, index) => {
+                const errorDetails = formatEventErrorDetails(event);
+                return (
+                  <tr key={`${event.finishedAt}-${event.endpoint}-${index}`}>
+                    <td>{formatEventTime(event.finishedAt)}</td>
+                    <td title={event.endpoint}>{event.endpoint}</td>
+                    <td title={event.model ?? ""}>{event.model ?? "--"}</td>
+                    <td title={event.accountLabel ?? ""}>{event.accountLabel ?? "--"}</td>
+                    <td>{formatEventStatus(event)}</td>
+                    <td>{formatBytes(event.requestBytes)}</td>
+                    <td>{formatStreamMode(event.downstreamStream)}</td>
+                    <td>{formatMs(event.totalMs)}</td>
+                    <td>{formatMs(event.firstChunkMs)}</td>
+                    <td className="dashboardErrorCell" title={errorDetails}>
+                      {errorDetails || "--"}
+                    </td>
+                    <td>{formatTokenCount(event.tokens.totalTokens)}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
@@ -328,23 +356,28 @@ function FailureDiagnostics({ events }: { events: DashboardMetricEvent[] }) {
         <EmptyState icon="✓" title="暂无失败请求" description="当前窗口内没有失败记录。" />
       ) : (
         <div className="dashboardDiagnosticList">
-          {events.slice(0, 5).map((event, index) => (
-            <article key={`${event.finishedAt}-${event.endpoint}-${index}`} className="dashboardDiagnosticItem isFailure">
-              <div>
-                <strong title={event.endpoint}>{event.endpoint}</strong>
-                <span>{formatEventTime(event.finishedAt)} · {event.model ?? "未知模型"}</span>
-              </div>
-              <small>
-                {event.statusCode ?? event.errorKind ?? "失败"}
-                {event.failureCategory ? ` · ${event.failureCategory}` : ""}
-              </small>
-              <p title={event.failureBrief ?? ""}>
-                {event.accountLabel ?? "未标记账号"} · 请求 {formatBytes(event.requestBytes)} ·{" "}
-                {formatStreamMode(event.downstreamStream)} · 总耗时 {formatMs(event.totalMs)}
-                {event.failureBrief ? ` · ${event.failureBrief}` : ""}
-              </p>
-            </article>
-          ))}
+          {events.map((event, index) => {
+            const errorDetails = formatEventErrorDetails(event);
+            return (
+              <article key={`${event.finishedAt}-${event.endpoint}-${index}`} className="dashboardDiagnosticItem isFailure">
+                <div>
+                  <strong title={event.endpoint}>{event.endpoint}</strong>
+                  <span>{formatEventTime(event.finishedAt)} · {event.model ?? "未知模型"}</span>
+                </div>
+                <small title={formatEventStatus(event)}>
+                  {formatEventStatus(event)}
+                  {event.failureCategory ? ` · ${event.failureCategory}` : ""}
+                </small>
+                <p>
+                  {event.accountLabel ?? "未标记账号"} · 请求 {formatBytes(event.requestBytes)} ·{" "}
+                  {formatStreamMode(event.downstreamStream)} · 总耗时 {formatMs(event.totalMs)}
+                </p>
+                {errorDetails ? (
+                  <pre className="dashboardErrorMessage">{errorDetails}</pre>
+                ) : null}
+              </article>
+            );
+          })}
         </div>
       )}
     </section>

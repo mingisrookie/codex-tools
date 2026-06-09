@@ -170,6 +170,10 @@ const API_PROXY_USAGE_RANGE_30D_SECONDS: i64 = 30 * 24 * 60 * 60;
 const DEFAULT_API_PROXY_USAGE_RANGE_SECONDS: i64 = API_PROXY_USAGE_RANGE_24H_SECONDS;
 const PROXY_CANDIDATE_FAILURE_COOLDOWN_SECS: i64 = 5 * 60;
 const PROXY_CANDIDATE_SEND_FAILED_COOLDOWN_SECS: i64 = 30;
+const PROXY_CANDIDATE_LATENCY_EWMA_ALPHA: f64 = 0.35;
+const AVERAGE_ROTATION_USAGE_BUCKET_SIZE_PERCENT: f64 = 50.0;
+const PROXY_CANDIDATE_LATENCY_PREFER_MIN_DELTA_MS: f64 = 250.0;
+const PROXY_CANDIDATE_LATENCY_PREFER_MIN_RELATIVE_DELTA: f64 = 0.15;
 
 #[derive(Clone)]
 pub(crate) struct ProxyStorageContext {
@@ -354,13 +358,14 @@ impl ResponsesTrace {
     fn log(&self, phase: &str, details: impl AsRef<str>) {
         dashboard_metrics::update_in_flight_phase(&self.dashboard_id, phase);
         let details = scrub_trace_details(details.as_ref());
+        let elapsed_ms = self.elapsed_ms();
         let line = if details.is_empty() {
             format!(
                 "ts={} responses_trace id={} phase={} elapsed_ms={} request_bytes={}\n",
                 now_unix_seconds(),
                 self.id,
                 phase,
-                self.elapsed_ms(),
+                elapsed_ms,
                 self.request_bytes,
             )
         } else {
@@ -369,43 +374,49 @@ impl ResponsesTrace {
                 now_unix_seconds(),
                 self.id,
                 phase,
-                self.elapsed_ms(),
+                elapsed_ms,
                 self.request_bytes,
                 details,
             )
         };
 
-        if let Some(parent) = self.log_path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        if let Ok(mut file) = fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.log_path)
-        {
-            let _ = file.write_all(line.as_bytes());
-        }
+        let log_path = self.log_path.clone();
+        let id = self.id.clone();
+        let phase = phase.to_string();
+        let request_bytes = self.request_bytes;
+        run_proxy_blocking_bookkeeping(move || {
+            if let Some(parent) = log_path.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
+            if let Ok(mut file) = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(&log_path)
+            {
+                let _ = file.write_all(line.as_bytes());
+            }
 
-        if details.is_empty() {
-            log::info!(
-                target: "codex_tools::api_proxy_trace",
-                "responses_trace id={} phase={} elapsed_ms={} request_bytes={}",
-                self.id,
-                phase,
-                self.elapsed_ms(),
-                self.request_bytes,
-            );
-        } else {
-            log::info!(
-                target: "codex_tools::api_proxy_trace",
-                "responses_trace id={} phase={} elapsed_ms={} request_bytes={} {}",
-                self.id,
-                phase,
-                self.elapsed_ms(),
-                self.request_bytes,
-                details,
-            );
-        }
+            if details.is_empty() {
+                log::info!(
+                    target: "codex_tools::api_proxy_trace",
+                    "responses_trace id={} phase={} elapsed_ms={} request_bytes={}",
+                    id,
+                    phase,
+                    elapsed_ms,
+                    request_bytes,
+                );
+            } else {
+                log::info!(
+                    target: "codex_tools::api_proxy_trace",
+                    "responses_trace id={} phase={} elapsed_ms={} request_bytes={} {}",
+                    id,
+                    phase,
+                    elapsed_ms,
+                    request_bytes,
+                    details,
+                );
+            }
+        });
     }
 
     fn set_model(&self, model: Option<String>) {
@@ -531,8 +542,20 @@ impl ResponsesTrace {
                 .map(|value| value.clone())
                 .unwrap_or_default(),
         };
-        dashboard_metrics::record_metric_event(&self.data_dir, event);
+        let data_dir = self.data_dir.clone();
+        run_proxy_blocking_bookkeeping(move || {
+            dashboard_metrics::record_metric_event(&data_dir, event);
+        });
         dashboard_metrics::finish_in_flight_request(&self.dashboard_id);
+    }
+}
+
+fn run_proxy_blocking_bookkeeping(task: impl FnOnce() + Send + 'static) {
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) => {
+            std::mem::drop(handle.spawn_blocking(task));
+        }
+        Err(_) => task(),
     }
 }
 
@@ -1595,6 +1618,7 @@ async fn chat_completions_handler(
                 None,
             ),
         );
+        record_proxy_candidate_latency(&context, &candidate, trace.elapsed_ms_u64()).await;
         record_api_proxy_tokens_from_response(&context.storage, &usage_metadata, &completed).await;
 
         let body =
@@ -1804,6 +1828,7 @@ async fn responses_handler(
                 None,
             ),
         );
+        record_proxy_candidate_latency(&context, &candidate, trace.elapsed_ms_u64()).await;
         record_api_proxy_tokens_from_response(&context.storage, &usage_metadata, &completed).await;
 
         let completed = rewrite_response_models_for_client(completed);
@@ -2345,27 +2370,10 @@ fn convert_openai_chat_request_to_codex(request: &Value) -> Result<(Value, bool)
                 .unwrap_or(true),
         ),
     );
-    root.insert(
-        "include".to_string(),
-        Value::Array(vec![Value::String(
-            "reasoning.encrypted_content".to_string(),
-        )]),
-    );
-    root.insert(
-        "reasoning".to_string(),
-        json!({
-            "effort": request_object
-                .get("reasoning_effort")
-                .and_then(Value::as_str)
-                .or_else(|| request_object.get("reasoning").and_then(|value| value.get("effort")).and_then(Value::as_str))
-                .unwrap_or("medium"),
-            "summary": request_object
-                .get("reasoning")
-                .and_then(|value| value.get("summary"))
-                .and_then(Value::as_str)
-                .unwrap_or("auto"),
-        }),
-    );
+    if let Some(reasoning) = explicit_chat_reasoning_payload(request_object) {
+        root.insert("reasoning".to_string(), reasoning);
+        ensure_reasoning_encrypted_content_include(&mut root);
+    }
 
     let mut input = Vec::new();
     for message in messages {
@@ -2532,19 +2540,17 @@ fn normalize_openai_responses_request(mut request: Value) -> Result<(Value, bool
         object.insert("parallel_tool_calls".to_string(), Value::Bool(true));
     }
 
-    let reasoning = object
-        .entry("reasoning".to_string())
-        .or_insert_with(|| Value::Object(Map::new()));
-    if !reasoning.is_object() {
-        *reasoning = Value::Object(Map::new());
-    }
-    if let Some(reasoning_object) = reasoning.as_object_mut() {
-        if !reasoning_object.contains_key("effort") {
-            reasoning_object.insert("effort".to_string(), Value::String("medium".to_string()));
+    if object.contains_key("reasoning") {
+        let reasoning = object
+            .entry("reasoning".to_string())
+            .or_insert_with(|| Value::Object(Map::new()));
+        if !reasoning.is_object() {
+            *reasoning = Value::Object(Map::new());
         }
-        if !reasoning_object.contains_key("summary") {
-            reasoning_object.insert("summary".to_string(), Value::String("auto".to_string()));
+        if let Some(reasoning_object) = reasoning.as_object_mut() {
+            normalize_reasoning_object(reasoning_object, None);
         }
+        ensure_reasoning_encrypted_content_include(object);
     }
 
     if let Some(include) = object.get_mut("include") {
@@ -2565,6 +2571,64 @@ fn normalize_openai_responses_request(mut request: Value) -> Result<(Value, bool
     }
 
     Ok((request, downstream_stream))
+}
+
+fn explicit_chat_reasoning_payload(request_object: &Map<String, Value>) -> Option<Value> {
+    let effort = request_object
+        .get("reasoning_effort")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty());
+    if effort.is_none() && !request_object.contains_key("reasoning") {
+        return None;
+    }
+
+    let mut reasoning = request_object
+        .get("reasoning")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    normalize_reasoning_object(&mut reasoning, effort);
+    Some(Value::Object(reasoning))
+}
+
+fn normalize_reasoning_object(reasoning_object: &mut Map<String, Value>, effort: Option<&str>) {
+    if let Some(effort) = effort {
+        reasoning_object.insert("effort".to_string(), Value::String(effort.to_string()));
+    } else if !reasoning_object
+        .get("effort")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        reasoning_object.insert("effort".to_string(), Value::String("medium".to_string()));
+    }
+    if !reasoning_object
+        .get("summary")
+        .and_then(Value::as_str)
+        .is_some_and(|value| !value.trim().is_empty())
+    {
+        reasoning_object.insert("summary".to_string(), Value::String("auto".to_string()));
+    }
+}
+
+fn ensure_reasoning_encrypted_content_include(object: &mut Map<String, Value>) {
+    const ENCRYPTED_REASONING_INCLUDE: &str = "reasoning.encrypted_content";
+
+    if let Some(include) = object.get_mut("include") {
+        if let Some(items) = include.as_array_mut() {
+            if !items
+                .iter()
+                .any(|value| value.as_str() == Some(ENCRYPTED_REASONING_INCLUDE))
+            {
+                items.push(Value::String(ENCRYPTED_REASONING_INCLUDE.to_string()));
+            }
+            return;
+        }
+    }
+
+    object.insert(
+        "include".to_string(),
+        Value::Array(vec![Value::String(ENCRYPTED_REASONING_INCLUDE.to_string())]),
+    );
 }
 
 #[derive(Default)]
@@ -3623,10 +3687,12 @@ async fn send_codex_request_over_candidates(
             ),
         );
     }
-    let current_sequential_account_key = sequential_account_key_for_request(
-        current_sequential_proxy_account_key(context).await,
+    let current_rotation_account_key = current_proxy_rotation_account_key(
+        context,
+        selection.load_balance,
         selection.persisted_sequential_account_key,
-    );
+    )
+    .await;
     let requested_account_id = requested_chatgpt_account_id_for_request(headers);
     let now = now_unix_seconds();
     let requested_account_id_matched = requested_account_id_matches_candidate(
@@ -3637,13 +3703,13 @@ async fn send_codex_request_over_candidates(
         && should_stick_to_current_sequential_candidate(
             &selection.candidates,
             selection.load_balance,
-            current_sequential_account_key.as_deref(),
+            current_rotation_account_key.as_deref(),
             now,
         );
     let candidates = order_proxy_candidates_for_request(
         selection.candidates,
         selection.load_balance,
-        current_sequential_account_key.as_deref(),
+        current_rotation_account_key.as_deref(),
     );
     let candidates = restrict_to_requested_chatgpt_account_id(
         candidates,
@@ -3655,6 +3721,13 @@ async fn send_codex_request_over_candidates(
     candidates =
         filter_proxy_candidates_for_runtime_cooldown(context, candidates, now, responses_trace)
             .await;
+    candidates = prefer_lower_latency_average_candidates(
+        context,
+        candidates,
+        selection.load_balance,
+        responses_trace,
+    )
+    .await;
     if let Some(trace) = responses_trace {
         trace.log(
             "candidate_pool_ready",
@@ -3664,7 +3737,7 @@ async fn send_codex_request_over_candidates(
     match apply_sequential_sticky_current(
         &mut candidates,
         stick_to_current_candidate,
-        current_sequential_account_key.as_deref(),
+        current_rotation_account_key.as_deref(),
     ) {
         SequentialStickyOutcome::StuckToCurrent(label) => {
             if let Some(trace) = responses_trace {
@@ -4331,8 +4404,8 @@ fn order_proxy_candidates_for_request(
 ) -> Vec<ProxyCandidate> {
     candidates.sort_by(compare_proxy_candidates);
 
-    if !matches!(load_balance.mode, ApiProxyLoadBalanceMode::Sequential) {
-        return candidates;
+    if matches!(load_balance.mode, ApiProxyLoadBalanceMode::Average) {
+        return rotate_average_candidates(candidates, current_sequential_account_key);
     }
 
     let Some(current_key) = current_sequential_account_key else {
@@ -4365,6 +4438,86 @@ fn order_proxy_candidates_for_request(
     }
 
     candidates
+}
+
+fn rotate_average_candidates(
+    mut candidates: Vec<ProxyCandidate>,
+    current_account_key: Option<&str>,
+) -> Vec<ProxyCandidate> {
+    let Some(current_key) = current_account_key else {
+        return candidates;
+    };
+    let Some(current_index) = candidates
+        .iter()
+        .position(|candidate| candidate.account_key == current_key)
+    else {
+        return candidates;
+    };
+
+    let mut start = current_index;
+    while start > 0
+        && same_average_rotation_bucket(&candidates[start - 1], &candidates[current_index])
+    {
+        start -= 1;
+    }
+
+    let mut end = current_index + 1;
+    while end < candidates.len()
+        && same_average_rotation_bucket(&candidates[end], &candidates[current_index])
+    {
+        end += 1;
+    }
+
+    if end.saturating_sub(start) <= 1 {
+        return candidates;
+    }
+
+    let mut bucket = candidates.drain(start..end).collect::<Vec<_>>();
+    let Some(bucket_current_index) = bucket
+        .iter()
+        .position(|candidate| candidate.account_key == current_key)
+    else {
+        return candidates;
+    };
+    let rotate_by = (bucket_current_index + 1) % bucket.len();
+    bucket.rotate_left(rotate_by);
+    for (offset, candidate) in bucket.into_iter().enumerate() {
+        candidates.insert(start + offset, candidate);
+    }
+    candidates
+}
+
+fn same_average_rotation_bucket(left: &ProxyCandidate, right: &ProxyCandidate) -> bool {
+    left.auth_refresh_blocked == right.auth_refresh_blocked
+        && is_free_plan(&left.plan_type) == is_free_plan(&right.plan_type)
+        && average_rotation_usage_bucket(
+            left.usage
+                .as_ref()
+                .and_then(|usage| usage.one_week.as_ref()),
+        ) == average_rotation_usage_bucket(
+            right
+                .usage
+                .as_ref()
+                .and_then(|usage| usage.one_week.as_ref()),
+        )
+        && average_rotation_usage_bucket(
+            left.usage
+                .as_ref()
+                .and_then(|usage| usage.five_hour.as_ref()),
+        ) == average_rotation_usage_bucket(
+            right
+                .usage
+                .as_ref()
+                .and_then(|usage| usage.five_hour.as_ref()),
+        )
+}
+
+fn average_rotation_usage_bucket(window: Option<&UsageWindow>) -> u8 {
+    let used_percent = usage_window_used_percent(window);
+    if !used_percent.is_finite() {
+        return u8::MAX;
+    }
+    (used_percent / AVERAGE_ROTATION_USAGE_BUCKET_SIZE_PERCENT).floor() as u8
 }
 
 fn requested_chatgpt_account_id_for_request(headers: &HeaderMap) -> Option<String> {
@@ -4472,6 +4625,21 @@ fn sequential_account_key_for_request(
     persisted_account_key: Option<String>,
 ) -> Option<String> {
     runtime_account_key.or(persisted_account_key)
+}
+
+async fn current_proxy_rotation_account_key(
+    context: &ProxyContext,
+    load_balance: ProxyLoadBalanceConfig,
+    persisted_sequential_account_key: Option<String>,
+) -> Option<String> {
+    let snapshot = context.shared.lock().await;
+    match load_balance.mode {
+        ApiProxyLoadBalanceMode::Average => snapshot.active_account_key.clone(),
+        ApiProxyLoadBalanceMode::Sequential => sequential_account_key_for_request(
+            snapshot.sequential_account_key.clone(),
+            persisted_sequential_account_key,
+        ),
+    }
 }
 
 fn should_stick_to_current_sequential_candidate(
@@ -4625,6 +4793,114 @@ async fn filter_proxy_candidates_for_runtime_cooldown(
             false
         })
         .collect()
+}
+
+async fn prefer_lower_latency_average_candidates(
+    context: &ProxyContext,
+    candidates: Vec<ProxyCandidate>,
+    load_balance: ProxyLoadBalanceConfig,
+    responses_trace: Option<&ResponsesTrace>,
+) -> Vec<ProxyCandidate> {
+    if !matches!(load_balance.mode, ApiProxyLoadBalanceMode::Average) || candidates.len() <= 1 {
+        return candidates;
+    }
+
+    let latency_ms = {
+        let shared = context.shared.lock().await;
+        shared.candidate_latency_ms.clone()
+    };
+    if latency_ms.is_empty() {
+        return candidates;
+    }
+
+    let mut ordered = Vec::with_capacity(candidates.len());
+    let mut index = 0;
+    while index < candidates.len() {
+        let mut end = index + 1;
+        while end < candidates.len()
+            && same_average_rotation_bucket(&candidates[index], &candidates[end])
+        {
+            end += 1;
+        }
+
+        let mut bucket = candidates[index..end].to_vec();
+        let known_latency_count = bucket
+            .iter()
+            .filter(|candidate| latency_ms.contains_key(&candidate.account_key))
+            .count();
+        if bucket.len() > 1 && known_latency_count == bucket.len() {
+            bucket.sort_by(|left, right| compare_proxy_candidate_latency(left, right, &latency_ms));
+            if let Some(trace) = responses_trace {
+                if let Some(first) = bucket.first() {
+                    if let Some(latency) = latency_ms.get(&first.account_key) {
+                        trace.log(
+                            "candidate_latency_prefer",
+                            format!(
+                                "{} latency_ms={}",
+                                safe_candidate_label(&first.label),
+                                latency.round() as u64
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+
+        ordered.extend(bucket);
+        index = end;
+    }
+
+    ordered
+}
+
+fn compare_proxy_candidate_latency(
+    left: &ProxyCandidate,
+    right: &ProxyCandidate,
+    latency_ms: &HashMap<String, f64>,
+) -> Ordering {
+    match (
+        latency_ms.get(&left.account_key),
+        latency_ms.get(&right.account_key),
+    ) {
+        (Some(left_latency), Some(right_latency)) => {
+            let delta = (left_latency - right_latency).abs();
+            let baseline = left_latency.min(*right_latency).max(1.0);
+            if delta < PROXY_CANDIDATE_LATENCY_PREFER_MIN_DELTA_MS
+                || (delta / baseline) < PROXY_CANDIDATE_LATENCY_PREFER_MIN_RELATIVE_DELTA
+            {
+                Ordering::Equal
+            } else {
+                left_latency.total_cmp(right_latency)
+            }
+        }
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+async fn record_proxy_candidate_latency(
+    context: &ProxyContext,
+    candidate: &ProxyCandidate,
+    latency_ms: u64,
+) {
+    if latency_ms == 0 {
+        return;
+    }
+
+    let mut shared = context.shared.lock().await;
+    let sample = latency_ms as f64;
+    let next = shared
+        .candidate_latency_ms
+        .get(&candidate.account_key)
+        .map(|current| {
+            (PROXY_CANDIDATE_LATENCY_EWMA_ALPHA * sample)
+                + ((1.0 - PROXY_CANDIDATE_LATENCY_EWMA_ALPHA) * *current)
+        })
+        .unwrap_or(sample);
+    shared
+        .candidate_latency_ms
+        .insert(candidate.account_key.clone(), next);
 }
 
 async fn cooldown_proxy_candidate(
@@ -5061,7 +5337,7 @@ fn extract_error_signals(body: &Bytes) -> ErrorSignals {
     let brief = if joined.is_empty() {
         "未返回具体错误信息".to_string()
     } else {
-        truncate_for_error(&joined, 120)
+        joined.clone()
     };
 
     ErrorSignals {
@@ -5375,19 +5651,23 @@ async fn record_api_proxy_tokens_from_response(
         return;
     };
 
-    if let Err(error) = append_api_proxy_usage_event(
-        storage,
-        api_proxy_usage_event(metadata, 0, tokens, now_unix_seconds()),
-    )
-    .await
-    {
-        log::warn!(
-            "记录 API 反代 token 统计失败 route={} model={}: {}",
-            metadata.route,
-            metadata.model,
-            error
-        );
-    }
+    let storage = storage.clone();
+    let metadata = metadata.clone();
+    tokio::spawn(async move {
+        if let Err(error) = append_api_proxy_usage_event(
+            &storage,
+            api_proxy_usage_event(&metadata, 0, tokens, now_unix_seconds()),
+        )
+        .await
+        {
+            log::warn!(
+                "记录 API 反代 token 统计失败 route={} model={}: {}",
+                metadata.route,
+                metadata.model,
+                error
+            );
+        }
+    });
 }
 
 fn maybe_record_stream_usage_tokens(
@@ -7142,10 +7422,6 @@ async fn persist_sequential_proxy_account_key_if_enabled(
     save_store_to_path(&path, &store)
 }
 
-async fn current_sequential_proxy_account_key(context: &ProxyContext) -> Option<String> {
-    context.shared.lock().await.sequential_account_key.clone()
-}
-
 async fn update_proxy_error(context: &ProxyContext, error: Option<String>) {
     let mut snapshot = context.shared.lock().await;
     snapshot.last_error = error;
@@ -7293,6 +7569,7 @@ mod tests {
     use super::convert_openai_image_generation_request_to_codex;
     use super::convert_responses_image_output_to_images_response;
     use super::cooldown_proxy_candidate;
+    use super::current_proxy_rotation_account_key;
     use super::extract_completed_response_from_sse;
     use super::filter_proxy_candidates_for_auth_refresh_state;
     use super::filter_proxy_candidates_for_usage;
@@ -7300,6 +7577,7 @@ mod tests {
     use super::format_service_tier_trace_details;
     use super::host_matches_no_proxy;
     use super::is_responses_terminal_event;
+    use super::load_api_proxy_usage_store_from_path;
     use super::new_proxy_storage_context;
     use super::normalize_openai_responses_request;
     use super::normalize_proxy_refresh_error;
@@ -7308,17 +7586,21 @@ mod tests {
     use super::order_proxy_candidates_for_request;
     use super::parse_http_proxy_config;
     use super::parse_proxy_request_body_limit_mib;
+    use super::prefer_lower_latency_average_candidates;
     use super::priority_service_tier_model;
     use super::priority_service_tier_model_needing_catalog_check;
     use super::proxy_failure_details_from_upstream_response;
     use super::prune_api_proxy_usage_events;
     use super::read_completed_response_from_sse_stream;
+    use super::record_api_proxy_tokens_from_response;
+    use super::record_proxy_candidate_latency;
     use super::requested_account_id_matches_candidate;
     use super::resolve_proxy_request_body_limit_bytes_from_mib_value;
     use super::response_service_tier_for_trace;
     use super::restrict_to_requested_chatgpt_account_id;
     use super::rewrite_response_models_for_client;
     use super::rewrite_sse_event_data_models_for_client;
+    use super::run_proxy_blocking_bookkeeping;
     use super::safe_candidate_label;
     use super::sequential_account_key_for_request;
     use super::service_tier_for_trace;
@@ -7340,6 +7622,7 @@ mod tests {
     use super::websocket_target_host_port;
     use super::websocket_upstream_close_error;
     use super::ApiProxyUsageEvent;
+    use super::ApiProxyUsageMetadata;
     use super::ChatStreamState;
     use super::CodexUpstreamResponse;
     use super::ImageMultipartRequest;
@@ -7350,6 +7633,7 @@ mod tests {
     use super::SequentialStickyOutcome;
     use super::SseEvent;
     use super::SseTerminalOutcome;
+    use super::API_PROXY_USAGE_FILE_NAME;
     use super::API_PROXY_USAGE_RANGE_1H_SECONDS;
     use super::API_PROXY_USAGE_RETENTION_SECONDS;
     use super::DEFAULT_PROXY_REQUEST_BODY_LIMIT_BYTES;
@@ -7371,6 +7655,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::RwLock;
     use std::time::Duration;
+    use std::time::Instant;
     use uuid::Uuid;
 
     fn model_by_id<'a>(models: &'a Value, id: &str) -> &'a Value {
@@ -7577,6 +7862,29 @@ mod tests {
     }
 
     #[test]
+    fn failure_details_keep_full_error_brief_for_dashboard() {
+        let long_message = format!(
+            "upstream rejected request because {}",
+            "policy detail ".repeat(20)
+        );
+        let body = Bytes::from(
+            json!({
+                "error": {
+                    "message": long_message,
+                    "type": "invalid_request_error",
+                    "code": "policy_rejected"
+                }
+            })
+            .to_string(),
+        );
+
+        let details = proxy_failure_details_from_upstream_response(StatusCode::BAD_REQUEST, &body);
+
+        assert!(details.failure_brief.contains(&long_message));
+        assert!(!details.failure_brief.ends_with("..."));
+    }
+
+    #[test]
     fn safe_candidate_label_redacts_email_labels() {
         assert_eq!(
             safe_candidate_label("operator@example.com"),
@@ -7737,6 +8045,166 @@ mod tests {
                 "weekly 20",
                 "free weekly 95",
                 "blocked low usage",
+            ]
+        );
+    }
+
+    #[test]
+    fn average_load_balance_rotates_same_priority_bucket_after_last_selected_candidate() {
+        let candidates = vec![
+            proxy_candidate("same usage a", "a", Some(10.0), Some(5.0), false),
+            proxy_candidate("same usage b", "b", Some(10.0), Some(5.0), false),
+            proxy_candidate("same usage c", "c", Some(10.0), Some(5.0), false),
+            proxy_candidate("higher usage", "d", Some(70.0), Some(70.0), false),
+        ];
+
+        let ordered = order_proxy_candidates_for_request(
+            candidates,
+            load_balance_config(ApiProxyLoadBalanceMode::Average, 80.0),
+            Some("b"),
+        );
+
+        assert_eq!(
+            candidate_labels(&ordered),
+            vec![
+                "same usage c",
+                "same usage a",
+                "same usage b",
+                "higher usage"
+            ]
+        );
+    }
+
+    #[test]
+    fn average_load_balance_rotates_low_usage_bucket_with_different_exact_usage() {
+        let candidates = vec![
+            proxy_candidate("low usage a", "a", Some(2.0), Some(12.0), false),
+            proxy_candidate("low usage b", "b", Some(32.0), Some(32.0), false),
+            proxy_candidate("low usage c", "c", Some(44.0), Some(44.0), false),
+            proxy_candidate("high usage", "d", Some(70.0), Some(70.0), false),
+        ];
+
+        let ordered = order_proxy_candidates_for_request(
+            candidates,
+            load_balance_config(ApiProxyLoadBalanceMode::Average, 80.0),
+            Some("a"),
+        );
+
+        assert_eq!(
+            candidate_labels(&ordered),
+            vec!["low usage b", "low usage c", "low usage a", "high usage"]
+        );
+    }
+
+    #[tokio::test]
+    async fn average_load_balance_uses_active_account_as_rotation_key() {
+        let context =
+            proxy_context_for_test(temp_proxy_data_dir(), Arc::new(tokio::sync::Mutex::new(())));
+        {
+            let mut snapshot = context.shared.lock().await;
+            snapshot.active_account_key = Some("active".to_string());
+            snapshot.sequential_account_key = None;
+        }
+
+        let current_key = current_proxy_rotation_account_key(
+            &context,
+            load_balance_config(ApiProxyLoadBalanceMode::Average, 80.0),
+            Some("persisted-sequential".to_string()),
+        )
+        .await;
+
+        assert_eq!(current_key.as_deref(), Some("active"));
+    }
+
+    #[tokio::test]
+    async fn average_latency_preference_preserves_rotation_for_close_samples() {
+        let context =
+            proxy_context_for_test(temp_proxy_data_dir(), Arc::new(tokio::sync::Mutex::new(())));
+        let first = proxy_candidate("same usage first", "first", Some(10.0), Some(5.0), false);
+        let next = proxy_candidate("same usage next", "next", Some(10.0), Some(5.0), false);
+
+        record_proxy_candidate_latency(&context, &first, 1_200).await;
+        record_proxy_candidate_latency(&context, &next, 1_300).await;
+
+        let ordered = prefer_lower_latency_average_candidates(
+            &context,
+            vec![next, first],
+            load_balance_config(ApiProxyLoadBalanceMode::Average, 80.0),
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            candidate_labels(&ordered),
+            vec!["same usage next", "same usage first"]
+        );
+    }
+
+    #[tokio::test]
+    async fn average_latency_preference_waits_for_unsampled_bucket_candidates() {
+        let context =
+            proxy_context_for_test(temp_proxy_data_dir(), Arc::new(tokio::sync::Mutex::new(())));
+        let slow = proxy_candidate("same usage slow", "slow", Some(10.0), Some(5.0), false);
+        let unknown = proxy_candidate(
+            "same usage unknown",
+            "unknown",
+            Some(10.0),
+            Some(5.0),
+            false,
+        );
+        let fast = proxy_candidate("same usage fast", "fast", Some(10.0), Some(5.0), false);
+
+        record_proxy_candidate_latency(&context, &slow, 2_000).await;
+        record_proxy_candidate_latency(&context, &fast, 1_100).await;
+
+        let ordered = prefer_lower_latency_average_candidates(
+            &context,
+            vec![slow, unknown, fast],
+            load_balance_config(ApiProxyLoadBalanceMode::Average, 80.0),
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            candidate_labels(&ordered),
+            vec!["same usage slow", "same usage unknown", "same usage fast"]
+        );
+    }
+
+    #[tokio::test]
+    async fn average_load_balance_prefers_lower_recent_latency_within_same_bucket() {
+        let context =
+            proxy_context_for_test(temp_proxy_data_dir(), Arc::new(tokio::sync::Mutex::new(())));
+        let slow = proxy_candidate("same usage slow", "slow", Some(10.0), Some(5.0), false);
+        let unknown = proxy_candidate(
+            "same usage unknown",
+            "unknown",
+            Some(10.0),
+            Some(5.0),
+            false,
+        );
+        let fast = proxy_candidate("same usage fast", "fast", Some(10.0), Some(5.0), false);
+        let higher_usage = proxy_candidate("higher usage", "higher", Some(70.0), Some(70.0), false);
+
+        record_proxy_candidate_latency(&context, &slow, 2_000).await;
+        record_proxy_candidate_latency(&context, &unknown, 1_500).await;
+        record_proxy_candidate_latency(&context, &fast, 1_100).await;
+
+        let ordered = prefer_lower_latency_average_candidates(
+            &context,
+            vec![slow, unknown, fast, higher_usage],
+            load_balance_config(ApiProxyLoadBalanceMode::Average, 80.0),
+            None,
+        )
+        .await;
+
+        assert_eq!(
+            candidate_labels(&ordered),
+            vec![
+                "same usage fast",
+                "same usage unknown",
+                "same usage slow",
+                "higher usage"
             ]
         );
     }
@@ -8168,6 +8636,48 @@ mod tests {
     }
 
     #[test]
+    fn convert_chat_request_does_not_add_reasoning_by_default() {
+        let request = json!({
+            "model": "gpt-5.4-mini",
+            "messages": [
+                { "role": "user", "content": "hello" }
+            ]
+        });
+
+        let (payload, _) =
+            convert_openai_chat_request_to_codex(&request).expect("payload should convert");
+
+        assert!(payload.get("reasoning").is_none());
+        assert!(payload.get("include").is_none());
+    }
+
+    #[test]
+    fn convert_chat_request_preserves_explicit_reasoning() {
+        let request = json!({
+            "model": "gpt-5.4-mini",
+            "reasoning_effort": "high",
+            "messages": [
+                { "role": "user", "content": "hello" }
+            ]
+        });
+
+        let (payload, _) =
+            convert_openai_chat_request_to_codex(&request).expect("payload should convert");
+
+        assert_eq!(
+            payload.get("reasoning"),
+            Some(&json!({
+                "effort": "high",
+                "summary": "auto",
+            }))
+        );
+        assert_eq!(
+            payload.get("include"),
+            Some(&json!(["reasoning.encrypted_content"]))
+        );
+    }
+
+    #[test]
     fn maps_chat_request_model_alias_to_upstream() {
         let request = json!({
             "model": "gpt-5-4",
@@ -8272,6 +8782,45 @@ mod tests {
             normalize_openai_responses_request(request).expect("request should normalize");
 
         assert!(payload.get("include").is_none());
+    }
+
+    #[test]
+    fn normalize_responses_request_does_not_add_reasoning_by_default() {
+        let request = json!({
+            "model": "gpt-5.5",
+            "input": "hello"
+        });
+
+        let (payload, _) =
+            normalize_openai_responses_request(request).expect("request should normalize");
+
+        assert!(payload.get("reasoning").is_none());
+    }
+
+    #[test]
+    fn normalize_responses_request_preserves_explicit_reasoning() {
+        let request = json!({
+            "model": "gpt-5.5",
+            "input": "hello",
+            "reasoning": {
+                "effort": "low"
+            }
+        });
+
+        let (payload, _) =
+            normalize_openai_responses_request(request).expect("request should normalize");
+
+        assert_eq!(
+            payload.get("reasoning"),
+            Some(&json!({
+                "effort": "low",
+                "summary": "auto",
+            }))
+        );
+        assert_eq!(
+            payload.get("include"),
+            Some(&json!(["reasoning.encrypted_content"]))
+        );
     }
 
     #[test]
@@ -9415,6 +9964,72 @@ data: {"type":"response.completed","response":{"id":"resp_123","created_at":1,"m
         assert_eq!(
             completed.get("output_text").and_then(Value::as_str),
             Some("OK")
+        );
+    }
+
+    #[tokio::test]
+    async fn non_stream_token_usage_recording_does_not_block_response() {
+        let data_dir = temp_proxy_data_dir();
+        let usage_lock = Arc::new(tokio::sync::Mutex::new(()));
+        let storage = new_proxy_storage_context(
+            data_dir.clone(),
+            Arc::new(tokio::sync::Mutex::new(())),
+            usage_lock.clone(),
+            Arc::new(tokio::sync::Mutex::new(())),
+            true,
+        );
+        let metadata = ApiProxyUsageMetadata {
+            model: "gpt-5.4-mini".to_string(),
+            route: "/v1/chat/completions".to_string(),
+        };
+        let response = json!({
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 2,
+                "total_tokens": 3
+            }
+        });
+
+        let guard = usage_lock.lock().await;
+        tokio::time::timeout(
+            Duration::from_millis(100),
+            record_api_proxy_tokens_from_response(&storage, &metadata, &response),
+        )
+        .await
+        .expect("token usage bookkeeping must not hold the client response path");
+        drop(guard);
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if let Ok(store) =
+                    load_api_proxy_usage_store_from_path(&data_dir.join(API_PROXY_USAGE_FILE_NAME))
+                {
+                    if store
+                        .events
+                        .iter()
+                        .any(|event| event.model == "gpt-5.4-mini" && event.tokens == 3)
+                    {
+                        break;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("background token usage record should still be persisted");
+    }
+
+    #[tokio::test]
+    async fn proxy_blocking_bookkeeping_runs_off_response_path() {
+        let started = Instant::now();
+
+        run_proxy_blocking_bookkeeping(|| {
+            std::thread::sleep(Duration::from_millis(250));
+        });
+
+        assert!(
+            started.elapsed() < Duration::from_millis(100),
+            "blocking proxy bookkeeping should be dispatched, not run inline"
         );
     }
 

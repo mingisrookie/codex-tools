@@ -268,13 +268,15 @@ Tauri 命令入口在：
 2. `plus` / `team` / `pro` 等非 `free` 计划优先，`free` 作为兜底
 3. 同类账号按 `1week`、`5h` 已用百分比从低到高排序
 4. 最后按标签名和账号 key 保持稳定排序
-5. 顺序负载均衡模式会在上述排序基础上优先复用当前同级账号，直到它达到配置的 `5h` 使用阈值；不会让当前 `free` 账号压过可用的非 `free` 账号
+5. 平均负载模式会在同健康、同计划优先级、同粗用量 bucket（默认按 50% 使用率分桶）的账号内，从上一次命中账号的下一个账号开始轮转；当 bucket 内账号都有最近延迟 EWMA 样本且差异足够明显时，同级 bucket 内才优先选择低延迟账号，避免单账号抖动把短请求 p50/avg 拉高，也避免未采样账号长期饿死。
+6. 顺序负载均衡模式会在上述排序基础上优先复用当前同级账号，直到它达到配置的 `5h` 使用阈值；不会让当前 `free` 账号压过可用的非 `free` 账号
 
 也就是：
 
 - 已停用账号不会参与反代，阻塞账号不会抢在正常账号前面
 - 非 `free` 计划优先，`free` 计划只在非 `free` 不可用或耗尽时兜底
 - 在同一类候选中，优先挑健康且更有余量的账号
+- 平均模式用于低延迟与多账号摊平，排序后会在同计划、同粗用量 bucket 内轮转起点；只有 bucket 内候选都有最近延迟样本且 EWMA 差距足够明显时，才把更快账号排到前面，否则保持轮转顺序
 - 顺序负载均衡避免长期压到同一个账号，但不会删除基础健康/计划/余量排序，也不会跨计划等级粘住低优先级账号
 - 账号用量自动刷新默认每 1 分钟一轮，可在账号界面按分钟调整；手动刷新按钮仍会立即请求
 
@@ -311,7 +313,7 @@ Tauri 命令入口在：
 
 这是当前链路最核心的一层。
 
-### 11.1 固定注入字段
+### 11.1 默认注入字段
 
 本地会补这些字段：
 
@@ -319,8 +321,11 @@ Tauri 命令入口在：
 - `store: false`
 - `instructions: ""`
 - `parallel_tool_calls: true`
-- `reasoning.effort: medium`
-- `reasoning.summary: auto`
+
+普通 `/v1/chat/completions` 不会默认注入 `reasoning` 和 `include:["reasoning.encrypted_content"]`，避免短请求被强制走 reasoning summary 路径拖慢。只有下游显式传入 `reasoning_effort` 或 `reasoning` 时，才补齐：
+
+- `reasoning.effort`（缺失时默认 `medium`）
+- `reasoning.summary`（缺失时默认 `auto`）
 - `include: ["reasoning.encrypted_content"]`
 
 这里 `store: false` 很关键。
@@ -387,9 +392,7 @@ OpenAI 里的：
 - 强制 `store: false`
 - 缺失时补 `instructions`
 - 缺失时补 `parallel_tool_calls`
-- 缺失时补 `reasoning.effort = medium`
-- 缺失时补 `reasoning.summary = auto`
-- 确保 `include` 里有 `reasoning.encrypted_content`
+- 默认不新增 `reasoning`；只有请求已带 `reasoning` 时，才补齐 `reasoning.effort = medium`、`reasoning.summary = auto`，并确保 `include` 里有 `reasoning.encrypted_content`
 - 丢弃上游不接受的 `metadata` 字段，避免 Cursor 等客户端报 `Unsupported parameter: metadata`
 
 ## 13. 上游 SSE 是怎么转回 OpenAI 的
@@ -435,7 +438,9 @@ OpenAI 里的：
    - usage
 5. 拼成一个普通的 OpenAI ChatCompletions JSON；如果先遇到 `response.failed` / `response.incomplete` / `response.cancelled`，按上游终止错误返回
 
-非流式 `/v1/chat/completions` 与 `/v1/responses` 都会写入 dashboard metrics / `api-proxy-trace.log`，关键阶段包括 `first_upstream_chunk`、`sse_terminal_event`、`non_stream_response_ready`。这里的总耗时以终止事件命中为准，不再把上游长连接后续 EOF 等待计入正常响应路径。
+非流式 `/v1/chat/completions` 与 `/v1/responses` 都会写入 dashboard metrics / `api-proxy-trace.log`，关键阶段包括 `first_upstream_chunk`、`sse_terminal_event`、`non_stream_response_ready`。这里的总耗时以终止事件命中为准，不再把上游长连接后续 EOF 等待计入正常响应路径。trace、dashboard metrics 和 usage token 统计写入都在后台执行，不阻塞客户端响应返回。
+
+Dashboard 的“最近请求”和“最近失败”会展示 status、`error_kind`、`failure_category` 与完整 `failure_brief`。其中 trace 文本仍保留短摘要，便于 tail 日志快速扫；前端日志卡片优先使用 metrics 中的完整错误正文，方便确认错误是否已经透传到用户侧。
 
 ## 14. 失败重试与自动切号
 

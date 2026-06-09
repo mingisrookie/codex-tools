@@ -20,6 +20,7 @@ pub(crate) struct ApiProxyRuntimeSnapshot {
     pub(crate) active_account_label: Option<String>,
     pub(crate) sequential_account_key: Option<String>,
     pub(crate) candidate_cooldowns: HashMap<String, i64>,
+    pub(crate) candidate_latency_ms: HashMap<String, f64>,
     pub(crate) last_error: Option<String>,
 }
 
