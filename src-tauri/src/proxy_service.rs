@@ -11,7 +11,6 @@ use std::net::Ipv4Addr;
 use std::path::Path;
 use std::path::PathBuf;
 use std::pin::Pin;
-#[cfg(target_os = "macos")]
 use std::process::Command;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering as AtomicOrdering;
@@ -113,8 +112,9 @@ const VERY_LARGE_PROXY_UPSTREAM_HEADERS_TIMEOUT_SECS: u64 = 45;
 const MAX_PROXY_CONNECT_RESPONSE_BYTES: usize = 16 * 1024;
 const PROXY_REQUEST_BODY_LIMIT_MIB_ENV_VAR: &str = "CODEX_TOOLS_PROXY_MAX_BODY_MIB";
 const RESPONSES_WEBSOCKET_EXPERIMENT_ENV_VAR: &str = "CODEX_TOOLS_RESPONSES_WEBSOCKET_EXPERIMENT";
-const CODEX_CLIENT_VERSION: &str = "0.125.0";
-const CODEX_USER_AGENT: &str = "codex_cli_rs/0.125.0";
+const DEFAULT_CODEX_CLIENT_VERSION: &str = "0.139.0";
+const CODEX_CLIENT_VERSION_ENV_VAR: &str = "CODEX_TOOLS_CODEX_CLIENT_VERSION";
+const CODEX_USER_AGENT_PREFIX: &str = "codex_cli_rs/";
 const RESPONSES_EXPERIMENTAL_BETA: &str = "responses=experimental";
 const RESPONSES_WEBSOCKETS_BETA: &str = "responses_websockets=2026-02-06";
 const SSE_DONE: &str = "data: [DONE]\n\n";
@@ -158,7 +158,8 @@ const RESPONSE_MODEL_NORMALIZATIONS: &[(&str, &str)] = &[
     ("gpt5.4", "gpt-5.4"),
     ("gpt-5-4", "gpt-5.4"),
 ];
-const UNSUPPORTED_RESPONSES_REQUEST_FIELDS: &[&str] = &["metadata", "prompt_cache_retention"];
+const UNSUPPORTED_RESPONSES_REQUEST_FIELDS: &[&str] =
+    &["metadata", "prompt_cache_retention", "max_output_tokens"];
 const API_PROXY_USAGE_FILE_NAME: &str = "api-proxy-usage.json";
 const API_PROXY_USAGE_STORE_VERSION: u8 = 1;
 const API_PROXY_USAGE_RETENTION_SECONDS: i64 = 30 * 24 * 60 * 60;
@@ -279,9 +280,16 @@ struct ProxyContext {
     api_key: Arc<RwLock<String>>,
     upstream_base_url: String,
     default_session_id: String,
+    codex_client_identity: CodexClientIdentity,
     client: reqwest::Client,
     shared: Arc<tokio::sync::Mutex<ApiProxyRuntimeSnapshot>>,
     candidate_cache: Arc<tokio::sync::Mutex<Option<ProxyCandidateSelectionCache>>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CodexClientIdentity {
+    version: String,
+    user_agent: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1047,15 +1055,12 @@ pub(crate) async fn start_api_proxy_with_runtime(
     let shared_api_key = Arc::new(RwLock::new(api_key));
 
     let client = reqwest::Client::builder()
-        .user_agent("codex-tools-proxy/0.1")
-        .http1_only()
-        .no_gzip()
-        .pool_max_idle_per_host(0)
         .timeout(std::time::Duration::from_secs(
             DEFAULT_PROXY_UPSTREAM_TIMEOUT_SECS,
         ))
         .build()
         .map_err(|error| format!("创建代理 HTTP 客户端失败: {error}"))?;
+    let codex_client_identity = resolve_codex_client_identity();
 
     let shared = Arc::new(tokio::sync::Mutex::new(ApiProxyRuntimeSnapshot::default()));
     let candidate_cache = Arc::new(tokio::sync::Mutex::new(Some(
@@ -1066,6 +1071,7 @@ pub(crate) async fn start_api_proxy_with_runtime(
         api_key: shared_api_key.clone(),
         upstream_base_url: resolve_codex_upstream_base_url(),
         default_session_id: uuid::Uuid::new_v4().to_string(),
+        codex_client_identity,
         client,
         shared: shared.clone(),
         candidate_cache,
@@ -1421,22 +1427,174 @@ fn codex_catalog_model_has_priority_tier(entry: &Value) -> bool {
         .unwrap_or(false)
 }
 
+fn resolve_codex_client_identity() -> CodexClientIdentity {
+    let cli_outputs = read_codex_cli_version_outputs();
+    let cli_output_refs: Vec<&str> = cli_outputs.iter().map(String::as_str).collect();
+    let package_jsons = read_codex_package_json_candidates();
+    let package_json_refs: Vec<&str> = package_jsons.iter().map(String::as_str).collect();
+    let env_override = std::env::var(CODEX_CLIENT_VERSION_ENV_VAR).ok();
+    let version = resolve_codex_client_version_from_sources(
+        env_override.as_deref(),
+        &cli_output_refs,
+        &package_json_refs,
+    );
+
+    CodexClientIdentity {
+        user_agent: codex_user_agent_for_version(&version),
+        version,
+    }
+}
+
+fn resolve_codex_client_version_from_sources(
+    env_override: Option<&str>,
+    cli_outputs: &[&str],
+    package_jsons: &[&str],
+) -> String {
+    if let Some(version) = normalize_codex_client_version(env_override.unwrap_or_default()) {
+        return version;
+    }
+
+    for output in cli_outputs {
+        if let Some(version) = parse_codex_cli_version_output(output) {
+            return version;
+        }
+    }
+
+    for package_json in package_jsons {
+        if let Some(version) = parse_codex_package_json_version(package_json) {
+            return version;
+        }
+    }
+
+    DEFAULT_CODEX_CLIENT_VERSION.to_string()
+}
+
+fn read_codex_cli_version_outputs() -> Vec<String> {
+    let mut outputs = Vec::new();
+    for command in codex_cli_version_commands() {
+        if let Ok(output) = Command::new(command).arg("--version").output() {
+            if output.status.success() {
+                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !stdout.is_empty() {
+                    outputs.push(stdout);
+                }
+            }
+        }
+    }
+    outputs
+}
+
+#[cfg(windows)]
+fn codex_cli_version_commands() -> &'static [&'static str] {
+    &["codex.cmd", "codex.exe", "codex"]
+}
+
+#[cfg(not(windows))]
+fn codex_cli_version_commands() -> &'static [&'static str] {
+    &["codex"]
+}
+
+fn read_codex_package_json_candidates() -> Vec<String> {
+    codex_package_json_candidate_paths()
+        .into_iter()
+        .filter_map(|path| fs::read_to_string(path).ok())
+        .collect()
+}
+
+fn codex_package_json_candidate_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        paths.push(
+            PathBuf::from(appdata)
+                .join("npm")
+                .join("node_modules")
+                .join("@openai")
+                .join("codex")
+                .join("package.json"),
+        );
+    }
+
+    if let Ok(npm_root) = Command::new("npm").args(["root", "-g"]).output() {
+        if npm_root.status.success() {
+            let root = String::from_utf8_lossy(&npm_root.stdout).trim().to_string();
+            if !root.is_empty() {
+                paths.push(
+                    PathBuf::from(root)
+                        .join("@openai")
+                        .join("codex")
+                        .join("package.json"),
+                );
+            }
+        }
+    }
+
+    paths
+}
+
+fn parse_codex_cli_version_output(output: &str) -> Option<String> {
+    output
+        .split_whitespace()
+        .find_map(normalize_codex_client_version)
+}
+
+fn parse_codex_package_json_version(package_json: &str) -> Option<String> {
+    let value = serde_json::from_str::<Value>(package_json).ok()?;
+    let version = value.get("version").and_then(Value::as_str)?;
+    normalize_codex_client_version(version)
+}
+
+fn normalize_codex_client_version(value: &str) -> Option<String> {
+    let version = value.trim().trim_start_matches('v');
+    if version.is_empty() || !version.as_bytes().first().is_some_and(u8::is_ascii_digit) {
+        return None;
+    }
+
+    let mut dot_count = 0;
+    for character in version.chars() {
+        match character {
+            '0'..='9' | '-' | '+' => {}
+            '.' => dot_count += 1,
+            'A'..='Z' | 'a'..='z' => {}
+            _ => return None,
+        }
+    }
+
+    if dot_count >= 2 {
+        Some(version.to_string())
+    } else {
+        None
+    }
+}
+
+fn codex_user_agent_for_version(version: &str) -> String {
+    format!("{CODEX_USER_AGENT_PREFIX}{version}")
+}
+
+#[cfg(test)]
 fn codex_model_catalog_url(upstream_base_url: &str) -> String {
+    codex_model_catalog_url_with_client_version(upstream_base_url, DEFAULT_CODEX_CLIENT_VERSION)
+}
+
+fn codex_model_catalog_url_with_client_version(
+    upstream_base_url: &str,
+    client_version: &str,
+) -> String {
     let base = upstream_base_url.trim_end_matches('/');
     match reqwest::Url::parse(base) {
         Ok(mut url) => {
             let path = format!("{}/models", url.path().trim_end_matches('/'));
             url.set_path(&path);
             url.query_pairs_mut()
-                .append_pair("client_version", CODEX_CLIENT_VERSION);
+                .append_pair("client_version", client_version);
             url.to_string()
         }
         Err(_) => {
             let (path, query) = base.split_once('?').unwrap_or((base, ""));
             if query.is_empty() {
-                format!("{path}/models?client_version={CODEX_CLIENT_VERSION}")
+                format!("{path}/models?client_version={client_version}")
             } else {
-                format!("{path}/models?{query}&client_version={CODEX_CLIENT_VERSION}")
+                format!("{path}/models?{query}&client_version={client_version}")
             }
         }
     }
@@ -2342,7 +2500,13 @@ fn convert_openai_chat_request_to_codex(request: &Value) -> Result<(Value, bool)
         .is_none()
         && request_object.contains_key("input")
     {
-        return normalize_openai_responses_request(request.clone());
+        let original_input = request_object.get("input").cloned();
+        let (mut payload, downstream_stream) = normalize_openai_responses_request(request.clone())?;
+        if let (Some(Value::String(text)), Some(object)) = (original_input, payload.as_object_mut())
+        {
+            object.insert("input".to_string(), Value::String(text));
+        }
+        return Ok((payload, downstream_stream));
     }
 
     let model = map_client_model_to_upstream(&required_string(request_object, "model")?)?;
@@ -2558,6 +2722,17 @@ fn normalize_openai_responses_request(mut request: Value) -> Result<(Value, bool
             *include = Value::Array(Vec::new());
         }
     }
+    if let Some(input) = object.get_mut("input") {
+        if let Some(text) = input.as_str().map(str::to_string) {
+            *input = json!([{
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": text
+                }]
+            }]);
+        }
+    }
 
     // Cursor may attach OpenAI-compatible fields that Codex upstream rejects.
     for key in UNSUPPORTED_RESPONSES_REQUEST_FIELDS {
@@ -2567,6 +2742,15 @@ fn normalize_openai_responses_request(mut request: Value) -> Result<(Value, bool
         object.insert(
             "service_tier".to_string(),
             map_client_service_tier_to_upstream(&service_tier),
+        );
+    } else if object
+        .get("model")
+        .and_then(Value::as_str)
+        .is_some_and(supports_fast_speed_tier)
+    {
+        object.insert(
+            "service_tier".to_string(),
+            Value::String("priority".to_string()),
         );
     }
 
@@ -3959,7 +4143,10 @@ async fn fetch_candidate_codex_model_catalog(
     context: &ProxyContext,
     candidate: &ProxyCandidate,
 ) -> Result<Value, String> {
-    let models_url = codex_model_catalog_url(&context.upstream_base_url);
+    let models_url = codex_model_catalog_url_with_client_version(
+        &context.upstream_base_url,
+        &context.codex_client_identity.version,
+    );
     let response = context
         .client
         .get(&models_url)
@@ -3973,8 +4160,8 @@ async fn fetch_candidate_codex_model_catalog(
         .header("ChatGPT-Account-Id", &candidate.account_id)
         .header("Accept", "application/json")
         .header("Originator", "codex_cli_rs")
-        .header("Version", CODEX_CLIENT_VERSION)
-        .header("User-Agent", CODEX_USER_AGENT)
+        .header("Version", &context.codex_client_identity.version)
+        .header("User-Agent", &context.codex_client_identity.user_agent)
         .send()
         .await
         .map_err(|error| format!("请求 Codex 模型 catalog 失败 {models_url}: {error}"))?;
@@ -4071,12 +4258,14 @@ async fn forward_codex_request_with_candidate(
         .get("version")
         .and_then(|value| value.to_str().ok())
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or(CODEX_CLIENT_VERSION);
+        .map(str::to_string)
+        .unwrap_or_else(|| context.codex_client_identity.version.clone());
     let user_agent = headers
         .get("user-agent")
         .and_then(|value| value.to_str().ok())
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or(CODEX_USER_AGENT);
+        .map(str::to_string)
+        .unwrap_or_else(|| context.codex_client_identity.user_agent.clone());
 
     if should_use_responses_websocket(payload) {
         return forward_codex_websocket_request_with_candidate(
@@ -4084,8 +4273,8 @@ async fn forward_codex_request_with_candidate(
             candidate,
             payload,
             &session_id,
-            version,
-            user_agent,
+            &version,
+            &user_agent,
             responses_trace,
         )
         .await;
@@ -4121,13 +4310,15 @@ async fn forward_codex_request_with_candidate(
         .header("Accept", "text/event-stream")
         .header("Content-Type", "application/json");
     if use_responses_experimental_beta {
-        request = request.header("OpenAI-Beta", RESPONSES_EXPERIMENTAL_BETA);
+        request = request
+            .header("OpenAI-Beta", RESPONSES_EXPERIMENTAL_BETA)
+            .header("User-Agent", &user_agent);
     } else {
         request = request
             .header("Originator", "codex_cli_rs")
-            .header("Version", version)
+            .header("Version", &version)
             .header("Session_id", session_id)
-            .header("User-Agent", user_agent)
+            .header("User-Agent", &user_agent)
             .header("Connection", "Keep-Alive");
     }
 
@@ -4778,21 +4969,48 @@ async fn filter_proxy_candidates_for_runtime_cooldown(
         return candidates;
     }
 
-    candidates
-        .into_iter()
-        .filter(|candidate| {
-            let Some(until) = cooldowns.get(&candidate.account_key) else {
-                return true;
-            };
-            if let Some(trace) = responses_trace {
-                trace.log(
-                    "candidate_cooldown_skip",
-                    format!("{} until={until}", safe_candidate_label(&candidate.label)),
-                );
-            }
-            false
-        })
-        .collect()
+    let mut ready_candidates = Vec::new();
+    let mut cooldown_candidates = Vec::new();
+
+    for candidate in candidates {
+        if let Some(until) = cooldowns.get(&candidate.account_key) {
+            cooldown_candidates.push((candidate, *until));
+        } else {
+            ready_candidates.push(candidate);
+        }
+    }
+
+    if ready_candidates.is_empty() {
+        if let Some(trace) = responses_trace {
+            let next_ready_at = cooldown_candidates
+                .iter()
+                .map(|(_, until)| *until)
+                .min()
+                .unwrap_or_default();
+            trace.log(
+                "candidate_cooldown_override",
+                format!(
+                    "reason=all_candidates_in_runtime_cooldown count={} next_ready_at={next_ready_at}",
+                    cooldown_candidates.len()
+                ),
+            );
+        }
+        return cooldown_candidates
+            .into_iter()
+            .map(|(candidate, _)| candidate)
+            .collect();
+    }
+
+    for (candidate, until) in cooldown_candidates {
+        if let Some(trace) = responses_trace {
+            trace.log(
+                "candidate_cooldown_skip",
+                format!("{} until={until}", safe_candidate_label(&candidate.label)),
+            );
+        }
+    }
+
+    ready_candidates
 }
 
 async fn prefer_lower_latency_average_candidates(
@@ -7562,6 +7780,8 @@ mod tests {
     use super::classify_retriable_failure;
     use super::codex_model_catalog_supports_priority;
     use super::codex_model_catalog_url;
+    use super::codex_model_catalog_url_with_client_version;
+    use super::codex_user_agent_for_version;
     use super::compare_proxy_candidates;
     use super::convert_completed_response_to_chat_completion;
     use super::convert_openai_chat_request_to_codex;
@@ -7572,6 +7792,7 @@ mod tests {
     use super::current_proxy_rotation_account_key;
     use super::extract_completed_response_from_sse;
     use super::filter_proxy_candidates_for_auth_refresh_state;
+    use super::filter_proxy_candidates_for_runtime_cooldown;
     use super::filter_proxy_candidates_for_usage;
     use super::find_http_header_end;
     use super::format_service_tier_trace_details;
@@ -7584,6 +7805,8 @@ mod tests {
     use super::normalize_responses_websocket_create;
     use super::now_unix_seconds;
     use super::order_proxy_candidates_for_request;
+    use super::parse_codex_cli_version_output;
+    use super::parse_codex_package_json_version;
     use super::parse_http_proxy_config;
     use super::parse_proxy_request_body_limit_mib;
     use super::prefer_lower_latency_average_candidates;
@@ -7595,6 +7818,7 @@ mod tests {
     use super::record_api_proxy_tokens_from_response;
     use super::record_proxy_candidate_latency;
     use super::requested_account_id_matches_candidate;
+    use super::resolve_codex_client_version_from_sources;
     use super::resolve_proxy_request_body_limit_bytes_from_mib_value;
     use super::response_service_tier_for_trace;
     use super::restrict_to_requested_chatgpt_account_id;
@@ -7624,6 +7848,7 @@ mod tests {
     use super::ApiProxyUsageEvent;
     use super::ApiProxyUsageMetadata;
     use super::ChatStreamState;
+    use super::CodexClientIdentity;
     use super::CodexUpstreamResponse;
     use super::ImageMultipartRequest;
     use super::ProxyCandidate;
@@ -7636,6 +7861,7 @@ mod tests {
     use super::API_PROXY_USAGE_FILE_NAME;
     use super::API_PROXY_USAGE_RANGE_1H_SECONDS;
     use super::API_PROXY_USAGE_RETENTION_SECONDS;
+    use super::DEFAULT_CODEX_CLIENT_VERSION;
     use super::DEFAULT_PROXY_REQUEST_BODY_LIMIT_BYTES;
     use super::DEFAULT_PROXY_UPSTREAM_HEADERS_TIMEOUT_SECS;
     use super::PROXY_CANDIDATE_SEND_FAILED_COOLDOWN_SECS;
@@ -7786,6 +8012,10 @@ mod tests {
             api_key: Arc::new(RwLock::new("test-key".to_string())),
             upstream_base_url: "http://127.0.0.1".to_string(),
             default_session_id: "test-session".to_string(),
+            codex_client_identity: CodexClientIdentity {
+                version: DEFAULT_CODEX_CLIENT_VERSION.to_string(),
+                user_agent: codex_user_agent_for_version(DEFAULT_CODEX_CLIENT_VERSION),
+            },
             client: reqwest::Client::new(),
             shared: Arc::new(tokio::sync::Mutex::new(ApiProxyRuntimeSnapshot::default())),
             candidate_cache: Arc::new(tokio::sync::Mutex::new(None)),
@@ -8328,11 +8558,88 @@ mod tests {
     fn codex_model_catalog_url_includes_client_version_query() {
         assert_eq!(
             codex_model_catalog_url("https://chatgpt.com/backend-api/codex"),
-            "https://chatgpt.com/backend-api/codex/models?client_version=0.125.0"
+            "https://chatgpt.com/backend-api/codex/models?client_version=0.139.0"
         );
         assert_eq!(
             codex_model_catalog_url("https://example.test/backend-api/codex?region=test"),
-            "https://example.test/backend-api/codex/models?region=test&client_version=0.125.0"
+            "https://example.test/backend-api/codex/models?region=test&client_version=0.139.0"
+        );
+    }
+
+    #[test]
+    fn parses_codex_cli_semver_from_version_output() {
+        assert_eq!(
+            parse_codex_cli_version_output("codex-cli 0.139.0\n").as_deref(),
+            Some("0.139.0")
+        );
+        assert_eq!(
+            parse_codex_cli_version_output("codex 0.140.1\r\n").as_deref(),
+            Some("0.140.1")
+        );
+        assert_eq!(parse_codex_cli_version_output("not a version"), None);
+    }
+
+    #[test]
+    fn parses_codex_package_json_version() {
+        let package_json = r#"{"name":"@openai/codex","version":"0.139.0"}"#;
+        assert_eq!(
+            parse_codex_package_json_version(package_json).as_deref(),
+            Some("0.139.0")
+        );
+        assert_eq!(parse_codex_package_json_version(r#"{"version":""}"#), None);
+    }
+
+    #[test]
+    fn resolves_codex_client_version_from_env_then_cli_then_package() {
+        assert_eq!(
+            resolve_codex_client_version_from_sources(
+                Some(" 0.150.0 "),
+                &["codex-cli 0.149.0"],
+                &[r#"{"version":"0.148.0"}"#],
+            ),
+            "0.150.0"
+        );
+        assert_eq!(
+            resolve_codex_client_version_from_sources(
+                None,
+                &["bad", "codex-cli 0.149.0"],
+                &[r#"{"version":"0.148.0"}"#],
+            ),
+            "0.149.0"
+        );
+        assert_eq!(
+            resolve_codex_client_version_from_sources(
+                None,
+                &["bad"],
+                &[r#"{"version":"0.148.0"}"#],
+            ),
+            "0.148.0"
+        );
+    }
+
+    #[test]
+    fn builds_codex_cli_user_agent_from_version() {
+        assert_eq!(
+            codex_user_agent_for_version("0.139.0"),
+            "codex_cli_rs/0.139.0"
+        );
+    }
+
+    #[test]
+    fn codex_model_catalog_url_can_follow_runtime_client_version() {
+        assert_eq!(
+            codex_model_catalog_url_with_client_version(
+                "https://chatgpt.com/backend-api/codex",
+                "0.139.0"
+            ),
+            "https://chatgpt.com/backend-api/codex/models?client_version=0.139.0"
+        );
+        assert_eq!(
+            codex_model_catalog_url_with_client_version(
+                "https://example.test/backend-api/codex?region=test",
+                "0.139.0"
+            ),
+            "https://example.test/backend-api/codex/models?region=test&client_version=0.139.0"
         );
     }
 
@@ -8738,6 +9045,48 @@ mod tests {
     }
 
     #[test]
+    fn normalize_responses_request_converts_string_input_to_user_message() {
+        let request = json!({
+            "model": "gpt-5.5",
+            "input": "hello"
+        });
+
+        let (payload, _) =
+            normalize_openai_responses_request(request).expect("request should normalize");
+
+        assert_eq!(
+            payload.get("input"),
+            Some(&json!([{
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "hello"
+                }]
+            }]))
+        );
+    }
+
+    #[test]
+    fn normalize_responses_request_strips_max_output_tokens() {
+        let request = json!({
+            "model": "gpt-5.5",
+            "input": [{
+                "role": "user",
+                "content": [{
+                    "type": "input_text",
+                    "text": "hello"
+                }]
+            }],
+            "max_output_tokens": 8
+        });
+
+        let (payload, _) =
+            normalize_openai_responses_request(request).expect("request should normalize");
+
+        assert!(payload.get("max_output_tokens").is_none());
+    }
+
+    #[test]
     fn normalize_responses_request_preserves_service_tier() {
         let request = json!({
             "model": "gpt-5.5",
@@ -8760,6 +9109,22 @@ mod tests {
             "model": "gpt-5.5",
             "input": "hello",
             "service_tier": "fast"
+        });
+
+        let (payload, _) =
+            normalize_openai_responses_request(request).expect("request should normalize");
+
+        assert_eq!(
+            payload.get("service_tier").and_then(Value::as_str),
+            Some("priority")
+        );
+    }
+
+    #[test]
+    fn normalize_responses_request_defaults_fast_model_to_priority() {
+        let request = json!({
+            "model": "gpt-5.5",
+            "input": "hello"
         });
 
         let (payload, _) =
@@ -9139,6 +9504,51 @@ mod tests {
             until > set_started,
             "cooldown until {until} should be later than call time {set_started}"
         );
+    }
+
+    #[tokio::test]
+    async fn runtime_cooldown_filter_keeps_candidates_when_every_candidate_is_blocked() {
+        let context =
+            proxy_context_for_test(temp_proxy_data_dir(), Arc::new(tokio::sync::Mutex::new(())));
+        let first = proxy_candidate("first", "first", Some(5.0), Some(20.0), false);
+        let second = proxy_candidate("second", "second", Some(5.0), Some(20.0), false);
+        let now = now_unix_seconds();
+        {
+            let mut shared = context.shared.lock().await;
+            shared
+                .candidate_cooldowns
+                .insert(first.account_key.clone(), now + 5);
+            shared
+                .candidate_cooldowns
+                .insert(second.account_key.clone(), now + 2);
+        }
+
+        let filtered =
+            filter_proxy_candidates_for_runtime_cooldown(&context, vec![first, second], now, None)
+                .await;
+
+        assert_eq!(candidate_labels(&filtered), vec!["first", "second"]);
+    }
+
+    #[tokio::test]
+    async fn runtime_cooldown_filter_skips_blocked_candidate_when_ready_candidate_exists() {
+        let context =
+            proxy_context_for_test(temp_proxy_data_dir(), Arc::new(tokio::sync::Mutex::new(())));
+        let blocked = proxy_candidate("blocked", "blocked", Some(5.0), Some(20.0), false);
+        let ready = proxy_candidate("ready", "ready", Some(5.0), Some(20.0), false);
+        let now = now_unix_seconds();
+        {
+            let mut shared = context.shared.lock().await;
+            shared
+                .candidate_cooldowns
+                .insert(blocked.account_key.clone(), now + 5);
+        }
+
+        let filtered =
+            filter_proxy_candidates_for_runtime_cooldown(&context, vec![blocked, ready], now, None)
+                .await;
+
+        assert_eq!(candidate_labels(&filtered), vec!["ready"]);
     }
 
     #[tokio::test]

@@ -52,6 +52,17 @@ CODEX_TOOLS_PROXY_MAX_BODY_MIB=1024 ./src-tauri/proxyd/target/debug/codex-tools-
   --port 8787
 ```
 
+如果远程机器没有安装官方 Codex CLI，或需要显式跟随桌面端确认过的版本，可以指定上游 Codex CLI 版本：
+
+```bash
+CODEX_TOOLS_CODEX_CLIENT_VERSION=0.139.0 ./src-tauri/proxyd/target/debug/codex-tools-proxyd serve \
+  --data-dir ~/.codex-tools-proxyd \
+  --host 0.0.0.0 \
+  --port 8787
+```
+
+该值会用于上游请求的 `Version`、`User-Agent: codex_cli_rs/<version>` 和模型 catalog 的 `client_version`。
+
 ## 数据目录
 
 daemon 会在 `data-dir` 下维护：

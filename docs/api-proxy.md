@@ -131,7 +131,11 @@ Tauri 命令入口在：
 2. 从账号池加载可用账号
 3. 绑定本地端口，默认 `8787`
 4. 生成一个本地代理专用 `sk-...` API Key
-5. 创建 `reqwest::Client`
+5. 解析 Codex CLI 客户端身份并创建 `reqwest::Client`
+   - 优先使用 `CODEX_TOOLS_CODEX_CLIENT_VERSION`
+   - 其次读取本机 `codex --version` / `codex.cmd --version`
+   - 再读取全局 npm 包 `@openai/codex/package.json`
+   - 最后回退到内置默认版本
 6. 启动一个 `axum` HTTP 服务
 7. 注册以下路由：
    - `/health`
@@ -296,9 +300,9 @@ Tauri 命令入口在：
 - `Authorization: Bearer <candidate.access_token>`
 - `ChatGPT-Account-Id: <candidate.account_id>`
 - `Originator: codex_cli_rs`
-- `Version: 0.101.0`
+- `Version: <当前解析到的 Codex CLI 版本>`
 - `Session_id: <uuid>`
-- `User-Agent: codex_cli_rs/0.101.0 (...)`
+- `User-Agent: codex_cli_rs/<当前解析到的 Codex CLI 版本>`
 - `Accept: text/event-stream`
 - `Content-Type: application/json`
 
@@ -306,7 +310,7 @@ Tauri 命令入口在：
 
 - 不是发到 `api.openai.com/v1/*`
 - 不是发到旧的 `conversation`
-- 默认模拟的是 Codex CLI 风格头
+- 默认跟随本机官方 Codex CLI 的版本头；远程或无 CLI 环境可用 `CODEX_TOOLS_CODEX_CLIENT_VERSION` 显式指定
 - 上游固定按 SSE 返回
 
 ## 11. `chat/completions` 到 Codex `responses` 的转换
@@ -390,6 +394,8 @@ OpenAI 里的：
 
 - 强制 `stream: true`
 - 强制 `store: false`
+- 对支持 Fast / Priority 服务档位的模型，如果下游没有传 `service_tier`，默认补 `service_tier: priority`；如果下游传 `service_tier: fast`，同样映射为上游的 `priority`
+- 兼容 OpenAI Responses 常见写法：`input` 为字符串时会转换为用户文本消息列表；下游传入的 `max_output_tokens` 会被剥离，避免 Codex upstream 拒绝该字段
 - 缺失时补 `instructions`
 - 缺失时补 `parallel_tool_calls`
 - 默认不新增 `reasoning`；只有请求已带 `reasoning` 时，才补齐 `reasoning.effort = medium`、`reasoning.summary = auto`，并确保 `include` 里有 `reasoning.encrypted_content`
@@ -473,6 +479,7 @@ Dashboard 的“最近请求”和“最近失败”会展示 status、`error_ki
 ### 14.3 cooldown 与顺序账号持久化
 
 - 候选账号 cooldown 使用失败发生时的当前时间计算，不能复用请求刚开始挑选账号时的旧时间，避免长时间等待上游响应头后冷却窗口已经落在过去
+- runtime cooldown 只用于“有其他候选账号时”的失败降权；如果当前过滤会把候选池清空（例如只有一个账号，或所有剩余账号都处于短暂传输失败 cooldown），代理会保留这些账号继续真实上游尝试，避免把本地冷却误报成“全部代理账号 5 小时用量已耗尽”
 - 顺序模式仍会同步更新运行时当前账号，保证面板和后续请求立即看到新目标
 - `accounts.json` 中的顺序账号目标只在目标账号变化时持久化，且持久化走后台任务，避免本地文件锁或磁盘写入阻塞首字路径
 
