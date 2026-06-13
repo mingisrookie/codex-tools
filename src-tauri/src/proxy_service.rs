@@ -2671,6 +2671,15 @@ fn convert_openai_chat_request_to_codex(request: &Value) -> Result<(Value, bool)
             "service_tier".to_string(),
             map_client_service_tier_to_upstream(service_tier),
         );
+    } else if root
+        .get("model")
+        .and_then(Value::as_str)
+        .is_some_and(supports_fast_speed_tier)
+    {
+        root.insert(
+            "service_tier".to_string(),
+            Value::String("priority".to_string()),
+        );
     }
 
     if let Some(response_format) = request_object.get("response_format") {
@@ -4254,18 +4263,8 @@ async fn forward_codex_request_with_candidate(
     let upstream_url = format!("{}/responses", context.upstream_base_url);
     let session_id = upstream_session_id_for_request(headers, &context.default_session_id);
 
-    let version = headers
-        .get("version")
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.trim().is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| context.codex_client_identity.version.clone());
-    let user_agent = headers
-        .get("user-agent")
-        .and_then(|value| value.to_str().ok())
-        .filter(|value| !value.trim().is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| context.codex_client_identity.user_agent.clone());
+    let version = context.codex_client_identity.version.clone();
+    let user_agent = context.codex_client_identity.user_agent.clone();
 
     if should_use_responses_websocket(payload) {
         return forward_codex_websocket_request_with_candidate(
@@ -9216,6 +9215,27 @@ mod tests {
                 }
             ],
             "service_tier": "fast"
+        });
+
+        let (payload, _) =
+            convert_openai_chat_request_to_codex(&request).expect("chat request should convert");
+
+        assert_eq!(
+            payload.get("service_tier").and_then(Value::as_str),
+            Some("priority")
+        );
+    }
+
+    #[test]
+    fn convert_chat_request_defaults_fast_model_service_tier_to_priority() {
+        let request = json!({
+            "model": "gpt-5.5",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": "hello"
+                }
+            ]
         });
 
         let (payload, _) =

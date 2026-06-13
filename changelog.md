@@ -1,5 +1,10 @@
 ## 更新日志
 
+- v2.0.3 (2026-06-13)
+  1. 修复 `/v1/chat/completions` 在下游未显式传 `service_tier` 时没有为 Fast 模型默认补 `priority` 的问题，确保普通聊天入口也和 `/v1/responses` 一样默认走 Priority/Fast 档位。
+  2. 保持下游 `service_tier: fast` 映射为上游 `priority`，不会把 `fast` 字符串原样透传给 Codex upstream。
+  3. 上游 Codex 请求固定使用启动时解析出的官方 Codex CLI `Version` 与 `User-Agent`，不再继承下游客户端自己的 `User-Agent` 或 `Version`。
+
 - v2.0.2 (2026-06-13)
   1. API 反代启动时动态解析本机官方 Codex CLI 版本，并让上游 `Version`、`User-Agent: codex_cli_rs/<version>` 和模型 catalog `client_version` 跟随该版本；无 CLI 环境可用 `CODEX_TOOLS_CODEX_CLIENT_VERSION` 显式覆盖。
   2. 清理反代 HTTP 客户端的自定义特征：移除 `codex-tools-proxy/0.1` UA、强制 HTTP/1、禁用 gzip 和禁用连接池等设置，改回项目 reqwest/rustls 默认行为。
