@@ -1,9 +1,11 @@
 ## 更新日志
 
-- 未发布
-  1. 修复单账号或全部候选都处于 runtime cooldown 时，本地候选池被清空并误报“全部代理账号 5 小时用量已耗尽或暂不可用”的问题；runtime cooldown 现在只在仍有其他候选账号时用于失败降权，不能作为终止条件。
-  2. 补齐远程 proxyd 打包源码清单，避免后续从桌面端重新部署 Linux proxyd 时遗漏 daemon 入口引用的共享模块。
-  3. 增强 `/v1/responses` 兼容性：支持 `input` 字符串写法，并剥离 Codex upstream 不接受的 `max_output_tokens` 字段。
+- v2.0.2 (2026-06-13)
+  1. API 反代启动时动态解析本机官方 Codex CLI 版本，并让上游 `Version`、`User-Agent: codex_cli_rs/<version>` 和模型 catalog `client_version` 跟随该版本；无 CLI 环境可用 `CODEX_TOOLS_CODEX_CLIENT_VERSION` 显式覆盖。
+  2. 清理反代 HTTP 客户端的自定义特征：移除 `codex-tools-proxy/0.1` UA、强制 HTTP/1、禁用 gzip 和禁用连接池等设置，改回项目 reqwest/rustls 默认行为。
+  3. 修复单账号或全部候选都处于 runtime cooldown 时，本地候选池被清空并误报“全部代理账号 5 小时用量已耗尽或暂不可用”的问题；runtime cooldown 现在只在仍有其他候选账号时用于失败降权，不能作为终止条件。
+  4. 增强 `/v1/responses` 兼容性：支持 `input` 字符串写法，并剥离 Codex upstream 不接受的 `max_output_tokens` 字段。
+  5. 补齐远程 proxyd 打包源码清单，并在 Linux proxyd 文档中说明远程机器缺少 Codex CLI 时的版本覆盖方式。
 
 - v2.0.1 (2026-05-27)
   1. 修复 `app-new.exe` 在请求携带已删除或不在启用池的 `ChatGPT-Account-Id` 时清空候选池，误报“全部代理账号 5 小时用量已耗尽或暂不可用”的问题。
