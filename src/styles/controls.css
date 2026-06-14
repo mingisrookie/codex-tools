@@ -519,19 +519,35 @@
   padding: 2px 4px 6px;
 }
 
+.settingsHero {
+  display: block;
+  border: 1px solid var(--section-line);
+  border-radius: 18px;
+  padding: 16px 18px;
+  background: color-mix(in srgb, var(--card) 94%, var(--surface-tint) 6%);
+  box-shadow: 0 8px 20px rgba(18, 34, 56, 0.055);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
 .settingsHeader h2 {
   margin: 0;
-  font: 650 1.08rem/1.2 var(--font-ui);
-  letter-spacing: -0.02em;
+  font: 760 clamp(1.32rem, 2.5vw, 2.1rem)/1.04 var(--font-ui);
+  letter-spacing: -0.055em;
+}
+
+.settingsHeader p {
+  margin: 7px 0 0;
+  max-width: 64ch;
+  color: var(--subtle);
+  font: 520 0.86rem/1.55 var(--font-ui);
 }
 
 .settingsGroup {
   border: 1px solid color-mix(in srgb, var(--line) 84%, var(--surface-tint) 16%);
   border-radius: 18px;
-  background: color-mix(in srgb, var(--import-bg) 72%, var(--surface-tint) 28%);
-  box-shadow:
-    0 10px 22px rgba(28, 43, 68, 0.05),
-    inset 0 1px var(--surface-highlight);
+  background: color-mix(in srgb, var(--card) 92%, var(--surface-tint) 8%);
+  box-shadow: inset 0 1px var(--surface-highlight-soft);
   overflow: hidden;
 }
 

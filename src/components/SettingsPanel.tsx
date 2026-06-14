@@ -104,6 +104,14 @@ export function SettingsPanel({
   return (
     <section className="settingsPage" aria-label={copy.settings.title}>
       <div className="settingsShell">
+        <header className="settingsHeader settingsHero">
+          <div>
+            <p className="sectionKicker">{copy.bottomDock.settings}</p>
+            <h2>{copy.settings.title}</h2>
+            <p>{copy.settings.subtitle}</p>
+          </div>
+        </header>
+
         <div className="settingsGroup">
           <div className="settingRow">
             <div className="settingMeta">

@@ -73,6 +73,7 @@ use crate::auth::extract_auth;
 use crate::auth::refresh_chatgpt_auth_tokens_serialized;
 use crate::dashboard_metrics;
 use crate::dashboard_metrics::DashboardMetricEvent;
+use crate::dashboard_metrics::DashboardRouteExplanation;
 use crate::dashboard_metrics::DashboardTokenUsage;
 use crate::models::normalize_api_proxy_sequential_five_hour_limit_percent;
 use crate::models::ApiProxyLoadBalanceMode;
@@ -88,6 +89,7 @@ use crate::state::ApiProxyRuntimeHandle;
 use crate::state::ApiProxyRuntimeSnapshot;
 #[cfg(feature = "desktop")]
 use crate::state::AppState;
+use crate::state::SessionAffinityEntry;
 use crate::store::account_store_path_from_data_dir;
 use crate::store::load_store_from_path;
 use crate::store::save_store_to_path;
@@ -175,6 +177,8 @@ const PROXY_CANDIDATE_LATENCY_EWMA_ALPHA: f64 = 0.35;
 const AVERAGE_ROTATION_USAGE_BUCKET_SIZE_PERCENT: f64 = 50.0;
 const PROXY_CANDIDATE_LATENCY_PREFER_MIN_DELTA_MS: f64 = 250.0;
 const PROXY_CANDIDATE_LATENCY_PREFER_MIN_RELATIVE_DELTA: f64 = 0.15;
+const SESSION_AFFINITY_MAX_ENTRIES: usize = 1024;
+const SESSION_AFFINITY_RETENTION_SECS: i64 = 6 * 60 * 60;
 
 #[derive(Clone)]
 pub(crate) struct ProxyStorageContext {
@@ -318,6 +322,7 @@ struct ResponsesTrace {
     first_chunk_ms: Arc<RwLock<Option<u64>>>,
     failure_category: Arc<RwLock<Option<String>>>,
     failure_brief: Arc<RwLock<Option<String>>>,
+    route_explanation: Arc<RwLock<Option<DashboardRouteExplanation>>>,
     tokens: Arc<RwLock<DashboardTokenUsage>>,
     last_sse_event_type: Arc<RwLock<Option<String>>>,
     terminal_sse_event_type: Arc<RwLock<Option<String>>>,
@@ -348,6 +353,7 @@ impl ResponsesTrace {
             first_chunk_ms: Arc::new(RwLock::new(None)),
             failure_category: Arc::new(RwLock::new(None)),
             failure_brief: Arc::new(RwLock::new(None)),
+            route_explanation: Arc::new(RwLock::new(None)),
             tokens: Arc::new(RwLock::new(DashboardTokenUsage::default())),
             last_sse_event_type: Arc::new(RwLock::new(None)),
             terminal_sse_event_type: Arc::new(RwLock::new(None)),
@@ -456,6 +462,12 @@ impl ResponsesTrace {
         dashboard_metrics::update_in_flight_account(&self.dashboard_id, label);
     }
 
+    fn set_route_explanation(&self, explanation: DashboardRouteExplanation) {
+        if let Ok(mut guard) = self.route_explanation.write() {
+            *guard = Some(explanation);
+        }
+    }
+
     fn set_upstream_headers_now(&self) {
         if let Ok(mut guard) = self.upstream_headers_ms.write() {
             *guard = Some(self.elapsed_ms_u64());
@@ -541,6 +553,11 @@ impl ResponsesTrace {
                 .and_then(|value| value.clone()),
             failure_brief: self
                 .failure_brief
+                .read()
+                .ok()
+                .and_then(|value| value.clone()),
+            route_explanation: self
+                .route_explanation
                 .read()
                 .ok()
                 .and_then(|value| value.clone()),
@@ -709,6 +726,17 @@ fn safe_trace_atom(value: &str) -> String {
         return "invalid".to_string();
     }
     truncate_for_error(trimmed, 80)
+}
+
+fn safe_session_affinity_hash(prefix: &str, value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "{prefix}:{}",
+        short_sha256_hex(format!("{prefix}:{trimmed}").as_bytes())
+    ))
 }
 
 fn short_sha256_hex(bytes: &[u8]) -> String {
@@ -1648,107 +1676,97 @@ async fn chat_completions_handler(
             Err(message) => return invalid_request_response(&message),
         };
 
-    let trace = if downstream_stream {
-        None
-    } else {
-        let trace = ResponsesTrace::new(
-            "/v1/chat/completions",
-            body.len(),
-            &context.storage.data_dir,
-        );
-        trace.log("request_received", "route=/v1/chat/completions");
-        trace.log(
-            "inbound_request",
-            format_service_tier_trace_details(
-                upstream_payload.get("model").and_then(Value::as_str),
-                &service_tier_for_trace(&upstream_payload),
-                None,
-            ),
-        );
-        trace.set_model(
-            upstream_payload
-                .get("model")
-                .and_then(Value::as_str)
-                .map(ToString::to_string),
-        );
-        trace.set_downstream_stream(false);
-        trace.log("upstream_request_start", "");
-        Some(trace)
-    };
+    let trace = ResponsesTrace::new(
+        "/v1/chat/completions",
+        body.len(),
+        &context.storage.data_dir,
+    );
+    trace.log("request_received", "route=/v1/chat/completions");
+    trace.log(
+        "inbound_request",
+        format_service_tier_trace_details(
+            upstream_payload.get("model").and_then(Value::as_str),
+            &service_tier_for_trace(&upstream_payload),
+            None,
+        ),
+    );
+    trace.set_model(
+        upstream_payload
+            .get("model")
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+    );
+    trace.set_downstream_stream(downstream_stream);
+    trace.log("upstream_request_start", "");
 
     let upstream = match send_codex_request_over_candidates(
         &context,
         "/v1/chat/completions",
         &headers,
         &upstream_payload,
-        trace.as_ref(),
+        Some(&trace),
     )
     .await
     {
         Ok(value) => value,
         Err(response) => {
-            if let Some(trace) = trace.as_ref() {
-                let status = response.status();
-                let (parts, body) = response.into_parts();
-                let body = to_bytes(body, DEFAULT_PROXY_REQUEST_BODY_LIMIT_BYTES)
-                    .await
-                    .unwrap_or_default();
-                let failure = proxy_failure_details_from_upstream_response(status, &body);
-                trace.log(
-                    "upstream_request_failed",
-                    format_proxy_failure_details(&failure),
-                );
-                trace.set_failure_context(
-                    failure.failure_category.clone(),
-                    Some(failure.failure_brief.clone()),
-                );
-                trace.finish(Some(status.as_u16()), Some(&failure.error_kind));
-                return Response::from_parts(parts, Body::from(body));
-            }
-            return response;
+            let status = response.status();
+            let (parts, body) = response.into_parts();
+            let body = to_bytes(body, DEFAULT_PROXY_REQUEST_BODY_LIMIT_BYTES)
+                .await
+                .unwrap_or_default();
+            let failure = proxy_failure_details_from_upstream_response(status, &body);
+            trace.log(
+                "upstream_request_failed",
+                format_proxy_failure_details(&failure),
+            );
+            trace.set_failure_context(
+                failure.failure_category.clone(),
+                Some(failure.failure_brief.clone()),
+            );
+            trace.finish(Some(status.as_u16()), Some(&failure.error_kind));
+            return Response::from_parts(parts, Body::from(body));
         }
     };
 
     let (candidate, upstream_response) = upstream;
-    if let Some(trace) = trace.as_ref() {
-        trace.set_account_label(Some(candidate.label.clone()));
-        trace.set_upstream_headers_now();
-        trace.log(
-            "upstream_headers_received",
-            format!(
-                "candidate_label={} status={} downstream_stream={downstream_stream}",
-                truncate_for_error(&candidate.label, 80),
-                upstream_response.status(),
-            ),
-        );
-    }
+    trace.set_account_label(Some(candidate_trace_label(&candidate)));
+    trace.set_upstream_headers_now();
+    trace.log(
+        "upstream_headers_received",
+        format!(
+            "candidate_label={} status={} downstream_stream={downstream_stream}",
+            candidate_trace_label(&candidate),
+            upstream_response.status(),
+        ),
+    );
     let persist_sequential_target =
         should_persist_sequential_target_for_request(&headers, &candidate);
     let proxy_target_update_started = Instant::now();
     update_proxy_target(&context, &candidate, persist_sequential_target).await;
-    if let Some(trace) = trace.as_ref() {
-        trace.log(
-            "proxy_target_updated",
-            format!(
-                "persist_sequential={} elapsed_ms={}",
-                persist_sequential_target,
-                proxy_target_update_started.elapsed().as_millis()
-            ),
-        );
-    }
+    trace.log(
+        "proxy_target_updated",
+        format!(
+            "persist_sequential={} elapsed_ms={}",
+            persist_sequential_target,
+            proxy_target_update_started.elapsed().as_millis()
+        ),
+    );
     update_proxy_error(&context, None).await;
     let usage_metadata =
         api_proxy_usage_metadata(&candidate, "/v1/chat/completions", &upstream_payload);
 
     if downstream_stream {
-        build_chat_streaming_response(upstream_response, context.storage.clone(), usage_metadata)
+        build_chat_streaming_response(
+            upstream_response,
+            trace,
+            context.storage.clone(),
+            usage_metadata,
+        )
     } else {
-        let trace = trace
-            .as_ref()
-            .expect("non-stream chat completions should have a trace");
         trace.log("non_stream_sse_read_start", "");
         let (upstream_headers, completed) =
-            match read_completed_response_from_sse_stream(upstream_response, Some(trace)).await {
+            match read_completed_response_from_sse_stream(upstream_response, Some(&trace)).await {
                 Ok(value) => value,
                 Err(error) => {
                     let message = format!("读取 Codex 上游响应失败: {error}");
@@ -1923,13 +1941,13 @@ async fn responses_handler(
     };
 
     let (candidate, upstream_response) = upstream;
-    trace.set_account_label(Some(candidate.label.clone()));
+    trace.set_account_label(Some(safe_candidate_label(&candidate.label)));
     trace.set_upstream_headers_now();
     trace.log(
         "upstream_headers_received",
         format!(
             "candidate_label={} status={} downstream_stream={downstream_stream}",
-            truncate_for_error(&candidate.label, 80),
+            candidate_trace_label(&candidate),
             upstream_response.status(),
         ),
     );
@@ -3880,6 +3898,8 @@ async fn send_codex_request_over_candidates(
             ),
         );
     }
+    let initial_candidate_count = selection.candidates.len();
+    let session_affinity_key = proxy_session_affinity_key(headers, payload);
     let current_rotation_account_key = current_proxy_rotation_account_key(
         context,
         selection.load_balance,
@@ -3909,11 +3929,20 @@ async fn send_codex_request_over_candidates(
         requested_account_id.as_deref(),
         responses_trace,
     );
+    let before_auth_count = candidates.len();
     let candidates = filter_proxy_candidates_for_auth_refresh_state(candidates, responses_trace);
+    let excluded_by_auth = before_auth_count.saturating_sub(candidates.len());
+    let before_usage_count = candidates.len();
     let mut candidates = filter_proxy_candidates_for_usage(candidates, now, responses_trace);
+    let excluded_by_usage = before_usage_count.saturating_sub(candidates.len());
+    let before_cooldown_count = candidates.len();
     candidates =
         filter_proxy_candidates_for_runtime_cooldown(context, candidates, now, responses_trace)
             .await;
+    let excluded_by_cooldown = before_cooldown_count.saturating_sub(candidates.len());
+    let before_latency_first_key = candidates
+        .first()
+        .map(|candidate| candidate.account_key.clone());
     candidates = prefer_lower_latency_average_candidates(
         context,
         candidates,
@@ -3921,6 +3950,28 @@ async fn send_codex_request_over_candidates(
         responses_trace,
     )
     .await;
+    let latency_preferred = before_latency_first_key.is_some()
+        && before_latency_first_key
+            != candidates
+                .first()
+                .map(|candidate| candidate.account_key.clone());
+    let (mut candidates, mut route_explanation) = apply_session_affinity(
+        context,
+        candidates,
+        session_affinity_key.as_deref(),
+        now,
+        responses_trace,
+    )
+    .await;
+    route_explanation.strategy = load_balance_strategy_name(selection.load_balance);
+    route_explanation.initial_candidate_count = initial_candidate_count;
+    route_explanation.available_candidate_count = candidates.len();
+    route_explanation.excluded_by_auth = excluded_by_auth;
+    route_explanation.excluded_by_usage = excluded_by_usage;
+    route_explanation.excluded_by_cooldown = excluded_by_cooldown;
+    route_explanation.requested_account_matched = requested_account_id_matched;
+    route_explanation.cooldown_applied = excluded_by_cooldown > 0;
+    route_explanation.latency_preferred = latency_preferred;
     if let Some(trace) = responses_trace {
         trace.log(
             "candidate_pool_ready",
@@ -3929,7 +3980,7 @@ async fn send_codex_request_over_candidates(
     }
     match apply_sequential_sticky_current(
         &mut candidates,
-        stick_to_current_candidate,
+        stick_to_current_candidate && !route_explanation.affinity_matched,
         current_rotation_account_key.as_deref(),
     ) {
         SequentialStickyOutcome::StuckToCurrent(label) => {
@@ -3946,6 +3997,9 @@ async fn send_codex_request_over_candidates(
             }
         }
         SequentialStickyOutcome::NotSticky => {}
+    }
+    if let Some(trace) = responses_trace {
+        trace.set_route_explanation(route_explanation.clone());
     }
     if candidates.is_empty() {
         let message =
@@ -3965,7 +4019,14 @@ async fn send_codex_request_over_candidates(
     for mut candidate in candidates {
         let mut did_refresh = false;
         let mut did_retry_send_failed = false;
-        let candidate_label = safe_candidate_label(&candidate.label);
+        let candidate_label = candidate_trace_label(&candidate);
+        if let Some(trace) = responses_trace {
+            trace.set_account_label(Some(candidate_label.clone()));
+            trace.set_route_explanation(route_explanation_for_candidate_attempt(
+                route_explanation.clone(),
+                &candidate,
+            ));
+        }
         if let Some(model) = priority_model.as_deref() {
             match candidate_supports_priority_service_tier(context, &candidate, model).await {
                 Ok(true) => {}
@@ -4035,6 +4096,19 @@ async fn send_codex_request_over_candidates(
             log_proxy_response_route(route, status);
             if status.is_success() {
                 record_api_proxy_call_success(context, &candidate, route, payload);
+                record_session_affinity(
+                    context,
+                    session_affinity_key.as_deref(),
+                    &candidate,
+                    now_unix_seconds(),
+                )
+                .await;
+                if let Some(trace) = responses_trace {
+                    trace.set_route_explanation(route_explanation_for_candidate_attempt(
+                        route_explanation.clone(),
+                        &candidate,
+                    ));
+                }
                 if let Some(trace) = responses_trace {
                     trace.log("usage_call_record_queued", "");
                 }
@@ -4719,6 +4793,34 @@ fn requested_chatgpt_account_id_for_request(headers: &HeaderMap) -> Option<Strin
         .map(ToString::to_string)
 }
 
+fn proxy_session_affinity_key(headers: &HeaderMap, payload: &Value) -> Option<String> {
+    for name in ["session_id", "x-session-id", "x-codex-session-id"] {
+        if let Some(key) = headers
+            .get(name)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| safe_session_affinity_hash("h", value))
+        {
+            return Some(key);
+        }
+    }
+
+    for key in [
+        "session_id",
+        "sessionId",
+        "previous_response_id",
+        "conversation_id",
+        "user",
+    ] {
+        if let Some(value) = payload.get(key).and_then(Value::as_str) {
+            if let Some(key) = safe_session_affinity_hash("p", value) {
+                return Some(key);
+            }
+        }
+    }
+
+    None
+}
+
 fn requested_account_id_matches_candidate(
     candidates: &[ProxyCandidate],
     requested_account_id: Option<&str>,
@@ -4730,6 +4832,114 @@ fn requested_account_id_matches_candidate(
     candidates
         .iter()
         .any(|candidate| candidate.account_id == requested_account_id)
+}
+
+fn load_balance_strategy_name(load_balance: ProxyLoadBalanceConfig) -> String {
+    match load_balance.mode {
+        ApiProxyLoadBalanceMode::Average => "average",
+        ApiProxyLoadBalanceMode::Sequential => "sequential",
+    }
+    .to_string()
+}
+
+async fn apply_session_affinity(
+    context: &ProxyContext,
+    mut candidates: Vec<ProxyCandidate>,
+    session_key: Option<&str>,
+    now: i64,
+    responses_trace: Option<&ResponsesTrace>,
+) -> (Vec<ProxyCandidate>, DashboardRouteExplanation) {
+    let mut explanation = DashboardRouteExplanation {
+        affinity_key_present: session_key.is_some(),
+        available_candidate_count: candidates.len(),
+        ..DashboardRouteExplanation::default()
+    };
+    let Some(session_key) = session_key else {
+        explanation.affinity_skipped_reason = Some("missing_session_key".to_string());
+        return (candidates, explanation);
+    };
+
+    let affinity = {
+        let mut snapshot = context.shared.lock().await;
+        snapshot.session_affinity.retain(|_, entry| {
+            entry.updated_at >= now.saturating_sub(SESSION_AFFINITY_RETENTION_SECS)
+        });
+        snapshot.session_affinity.get(session_key).cloned()
+    };
+
+    let Some(affinity) = affinity else {
+        explanation.affinity_skipped_reason = Some("no_binding".to_string());
+        return (candidates, explanation);
+    };
+
+    let Some(index) = candidates
+        .iter()
+        .position(|candidate| candidate.account_key == affinity.account_key)
+    else {
+        explanation.affinity_skipped_reason = Some("sticky_candidate_unavailable".to_string());
+        if let Some(trace) = responses_trace {
+            trace.log(
+                "session_affinity_unavailable",
+                format!("account={}", safe_candidate_label(&affinity.account_label)),
+            );
+        }
+        return (candidates, explanation);
+    };
+
+    if index != 0 {
+        let candidate = candidates.remove(index);
+        candidates.insert(0, candidate);
+    }
+    explanation.affinity_matched = true;
+    explanation.selected_account_label = candidates
+        .first()
+        .map(|candidate| safe_candidate_label(&candidate.label));
+    explanation.selected_account_id = Some(safe_account_id_summary(&affinity.account_id));
+    if let Some(trace) = responses_trace {
+        if let Some(candidate) = candidates.first() {
+            trace.log(
+                "session_affinity_matched",
+                safe_candidate_label(&candidate.label),
+            );
+        }
+    }
+    (candidates, explanation)
+}
+
+async fn record_session_affinity(
+    context: &ProxyContext,
+    session_key: Option<&str>,
+    candidate: &ProxyCandidate,
+    now: i64,
+) {
+    let Some(session_key) = session_key else {
+        return;
+    };
+    let mut snapshot = context.shared.lock().await;
+    snapshot
+        .session_affinity
+        .retain(|_, entry| entry.updated_at >= now.saturating_sub(SESSION_AFFINITY_RETENTION_SECS));
+    snapshot.session_affinity.insert(
+        session_key.to_string(),
+        SessionAffinityEntry {
+            account_key: candidate.account_key.clone(),
+            account_id: candidate.account_id.clone(),
+            account_label: safe_candidate_label(&candidate.label),
+            updated_at: now,
+        },
+    );
+
+    while snapshot.session_affinity.len() > SESSION_AFFINITY_MAX_ENTRIES {
+        let Some(oldest_key) = snapshot
+            .session_affinity
+            .iter()
+            .min_by_key(|(_, entry)| entry.updated_at)
+            .map(|(key, _)| key.clone())
+        else {
+            break;
+        };
+        snapshot.session_affinity.remove(&oldest_key);
+    }
 }
 
 fn should_persist_sequential_target_for_request(
@@ -4773,7 +4983,7 @@ fn restrict_to_requested_chatgpt_account_id(
         if let Some(trace) = responses_trace {
             trace.log(
                 "requested_account_missing",
-                format!("account_id={}", safe_trace_atom(requested_account_id)),
+                safe_requested_account_id_detail(requested_account_id),
             );
         }
         return fallback_candidates;
@@ -5586,6 +5796,30 @@ fn safe_candidate_label(label: &str) -> String {
     } else {
         value
     }
+}
+
+fn candidate_trace_label(candidate: &ProxyCandidate) -> String {
+    safe_candidate_label(&candidate.label)
+}
+
+fn safe_account_id_summary(account_id: &str) -> String {
+    format!("acct:{}", short_sha256_hex(account_id.as_bytes()))
+}
+
+fn safe_requested_account_id_detail(account_id: &str) -> String {
+    format!(
+        "account_id_hash={}",
+        short_sha256_hex(account_id.as_bytes())
+    )
+}
+
+fn route_explanation_for_candidate_attempt(
+    mut explanation: DashboardRouteExplanation,
+    candidate: &ProxyCandidate,
+) -> DashboardRouteExplanation {
+    explanation.selected_account_label = Some(candidate_trace_label(candidate));
+    explanation.selected_account_id = Some(safe_account_id_summary(&candidate.account_id));
+    explanation
 }
 
 fn collect_error_parts(value: &Value, parts: &mut Vec<String>) {
@@ -6523,31 +6757,96 @@ fn build_passthrough_sse_response(
 
 fn build_chat_streaming_response(
     upstream: CodexUpstreamResponse,
+    trace: ResponsesTrace,
     usage_storage: ProxyStorageContext,
     usage_metadata: ApiProxyUsageMetadata,
 ) -> Response<Body> {
     let (upstream_headers, mut upstream_stream) = upstream.into_stream();
+    trace.log("downstream_chat_stream_start", "");
     let output = stream! {
         let mut decoder = SseDecoder::default();
         let mut state = ChatStreamState::default();
         let mut recorded_usage = false;
+        let mut saw_first_chunk = false;
+        let mut chunk_count: u64 = 0;
+        let mut event_count: u64 = 0;
+        let mut upstream_bytes: usize = 0;
 
         while let Some(chunk) = upstream_stream.next().await {
             match chunk {
                 Ok(chunk) => {
+                    chunk_count += 1;
+                    upstream_bytes += chunk.len();
+                    if !saw_first_chunk {
+                        saw_first_chunk = true;
+                        trace.set_first_chunk_now();
+                        trace.log(
+                            "first_upstream_chunk",
+                            format!("chunk_bytes={}", chunk.len()),
+                        );
+                    }
                     for event in decoder.push(&chunk) {
+                        event_count += 1;
                         maybe_record_stream_usage_tokens(
                             &usage_storage,
                             &usage_metadata,
                             &event,
                             &mut recorded_usage,
                         );
+                        let event_type =
+                            sse_event_type(&event).unwrap_or_else(|| "unknown".to_string());
+                        let terminal_outcome = trace.observe_sse_event(&event);
+                        if event_count == 1 || event_count % 100 == 0 {
+                            trace.log(
+                                "sse_progress",
+                                format!(
+                                    "events={event_count} chunks={chunk_count} upstream_bytes={upstream_bytes} last_sse_event={event_type}",
+                                ),
+                            );
+                        }
                         for value in translate_sse_event_to_chat_chunk(&event, &mut state) {
                             yield Ok::<Bytes, Infallible>(sse_data_chunk(&value));
+                        }
+                        if let Some(outcome) = terminal_outcome {
+                            trace.log(
+                                "sse_terminal_event",
+                                format!(
+                                    "event={event_type} actual_service_tier={} chunks={chunk_count} events={event_count} upstream_bytes={upstream_bytes}",
+                                    completed_event_service_tier_for_trace(&event),
+                                ),
+                            );
+                            match outcome {
+                                SseTerminalOutcome::Completed => {
+                                    trace.finish(Some(StatusCode::OK.as_u16()), None);
+                                }
+                                SseTerminalOutcome::Failed => {
+                                    trace.set_failure_context(
+                                        Some("upstream_response_failed".to_string()),
+                                        Some("上游返回 response.failed 终止事件".to_string()),
+                                    );
+                                    trace.finish(None, Some("upstream_response_failed"));
+                                }
+                                SseTerminalOutcome::Incomplete => {
+                                    trace.set_failure_context(
+                                        Some("upstream_response_incomplete".to_string()),
+                                        Some("上游返回 response.incomplete 终止事件".to_string()),
+                                    );
+                                    trace.finish(None, Some("upstream_response_incomplete"));
+                                }
+                            }
                         }
                     }
                 }
                 Err(error) => {
+                    trace.log(
+                        "upstream_stream_error",
+                        format!("error={}", truncate_for_error(&error, 200)),
+                    );
+                    trace.set_failure_context(
+                        Some("upstream_stream_error".to_string()),
+                        Some(truncate_for_error(&error, 200)),
+                    );
+                    trace.finish(None, Some("upstream_stream_error"));
                     yield Ok::<Bytes, Infallible>(sse_data_chunk(&json!({
                         "error": {
                             "message": format!("上游流式响应中断: {error}")
@@ -6560,17 +6859,55 @@ fn build_chat_streaming_response(
         }
 
         for event in decoder.finish() {
+            event_count += 1;
             maybe_record_stream_usage_tokens(
                 &usage_storage,
                 &usage_metadata,
                 &event,
                 &mut recorded_usage,
             );
+            let event_type = sse_event_type(&event).unwrap_or_else(|| "unknown".to_string());
+            let terminal_outcome = trace.observe_sse_event(&event);
             for value in translate_sse_event_to_chat_chunk(&event, &mut state) {
                 yield Ok::<Bytes, Infallible>(sse_data_chunk(&value));
             }
+            if let Some(outcome) = terminal_outcome {
+                trace.log(
+                    "sse_terminal_event",
+                    format!(
+                        "event={event_type} actual_service_tier={} chunks={chunk_count} events={event_count} upstream_bytes={upstream_bytes}",
+                        completed_event_service_tier_for_trace(&event),
+                    ),
+                );
+                match outcome {
+                    SseTerminalOutcome::Completed => {
+                        trace.finish(Some(StatusCode::OK.as_u16()), None);
+                    }
+                    SseTerminalOutcome::Failed => {
+                        trace.set_failure_context(
+                            Some("upstream_response_failed".to_string()),
+                            Some("上游返回 response.failed 终止事件".to_string()),
+                        );
+                        trace.finish(None, Some("upstream_response_failed"));
+                    }
+                    SseTerminalOutcome::Incomplete => {
+                        trace.set_failure_context(
+                            Some("upstream_response_incomplete".to_string()),
+                            Some("上游返回 response.incomplete 终止事件".to_string()),
+                        );
+                        trace.finish(None, Some("upstream_response_incomplete"));
+                    }
+                }
+            }
         }
 
+        trace.log(
+            "upstream_stream_end",
+            format!(
+                "chunks={chunk_count} events={event_count} upstream_bytes={upstream_bytes}",
+            ),
+        );
+        trace.finish(Some(StatusCode::OK.as_u16()), None);
         yield Ok::<Bytes, Infallible>(Bytes::from_static(SSE_DONE.as_bytes()));
     };
 
@@ -7586,7 +7923,7 @@ async fn update_proxy_target(
         );
         snapshot.active_account_key = Some(candidate.account_key.clone());
         snapshot.active_account_id = Some(candidate.account_id.clone());
-        snapshot.active_account_label = Some(candidate.label.clone());
+        snapshot.active_account_label = Some(safe_candidate_label(&candidate.label));
         if persist_sequential_target {
             snapshot.sequential_account_key = Some(candidate.account_key.clone());
         }
@@ -7774,8 +8111,10 @@ mod tests {
     use super::api_proxy_usage_bucket_seconds;
     use super::api_proxy_usage_store_has_legacy_private_fields;
     use super::apply_sequential_sticky_current;
+    use super::apply_session_affinity;
     use super::build_api_proxy_usage_stats;
     use super::build_models_response;
+    use super::candidate_trace_label;
     use super::classify_retriable_failure;
     use super::codex_model_catalog_supports_priority;
     use super::codex_model_catalog_url;
@@ -7812,10 +8151,12 @@ mod tests {
     use super::priority_service_tier_model;
     use super::priority_service_tier_model_needing_catalog_check;
     use super::proxy_failure_details_from_upstream_response;
+    use super::proxy_session_affinity_key;
     use super::prune_api_proxy_usage_events;
     use super::read_completed_response_from_sse_stream;
     use super::record_api_proxy_tokens_from_response;
     use super::record_proxy_candidate_latency;
+    use super::record_session_affinity;
     use super::requested_account_id_matches_candidate;
     use super::resolve_codex_client_version_from_sources;
     use super::resolve_proxy_request_body_limit_bytes_from_mib_value;
@@ -7823,8 +8164,10 @@ mod tests {
     use super::restrict_to_requested_chatgpt_account_id;
     use super::rewrite_response_models_for_client;
     use super::rewrite_sse_event_data_models_for_client;
+    use super::route_explanation_for_candidate_attempt;
     use super::run_proxy_blocking_bookkeeping;
     use super::safe_candidate_label;
+    use super::safe_requested_account_id_detail;
     use super::sequential_account_key_for_request;
     use super::service_tier_for_trace;
     use super::short_sha256_hex;
@@ -7864,6 +8207,7 @@ mod tests {
     use super::DEFAULT_PROXY_REQUEST_BODY_LIMIT_BYTES;
     use super::DEFAULT_PROXY_UPSTREAM_HEADERS_TIMEOUT_SECS;
     use super::PROXY_CANDIDATE_SEND_FAILED_COOLDOWN_SECS;
+    use crate::dashboard_metrics::DashboardRouteExplanation;
     use crate::models::ApiProxyLoadBalanceMode;
     use crate::models::AppSettings;
     use crate::models::UsageSnapshot;
@@ -8119,6 +8463,59 @@ mod tests {
             safe_candidate_label("operator@example.com"),
             "o***@example.com"
         );
+    }
+
+    #[test]
+    fn candidate_trace_label_uses_masked_account_label() {
+        let candidate = proxy_candidate(
+            "acct",
+            "acct-very-long-sensitive-id",
+            Some(10.0),
+            Some(10.0),
+            false,
+        );
+        let mut candidate = candidate;
+        candidate.label = "operator@example.com".to_string();
+
+        assert_eq!(candidate_trace_label(&candidate), "o***@example.com");
+    }
+
+    #[test]
+    fn requested_account_id_detail_does_not_log_raw_header_value() {
+        let raw = "acct-sensitive-workspace-0123456789";
+        let detail = safe_requested_account_id_detail(raw);
+
+        assert!(!detail.contains(raw));
+        assert!(detail.starts_with("account_id_hash="));
+    }
+
+    #[test]
+    fn route_explanation_attempt_records_safe_selected_candidate() {
+        let mut explanation = DashboardRouteExplanation::default();
+        let mut candidate = proxy_candidate(
+            "acct",
+            "acct-sensitive-workspace-0123456789",
+            Some(10.0),
+            Some(10.0),
+            false,
+        );
+        candidate.label = "operator@example.com".to_string();
+
+        explanation = route_explanation_for_candidate_attempt(explanation, &candidate);
+
+        assert_eq!(
+            explanation.selected_account_label.as_deref(),
+            Some("o***@example.com")
+        );
+        assert_ne!(
+            explanation.selected_account_id.as_deref(),
+            Some("acct-sensitive-workspace-0123456789")
+        );
+        assert!(explanation
+            .selected_account_id
+            .as_deref()
+            .unwrap_or_default()
+            .starts_with("acct:"));
     }
 
     #[test]
@@ -9548,6 +9945,113 @@ mod tests {
                 .await;
 
         assert_eq!(candidate_labels(&filtered), vec!["first", "second"]);
+    }
+
+    #[test]
+    fn session_affinity_key_uses_explicit_header_without_leaking_value() {
+        let mut headers = HeaderMap::new();
+        headers.insert("Session_id", "caller-session-123".parse().unwrap());
+        let key = proxy_session_affinity_key(&headers, &json!({"model": "gpt-5.5"}))
+            .expect("explicit caller session header should create an affinity key");
+
+        assert!(key.starts_with("h:"));
+        assert!(!key.contains("caller-session-123"));
+        assert_eq!(
+            key,
+            proxy_session_affinity_key(&headers, &json!({"model": "gpt-5.4"})).unwrap()
+        );
+    }
+
+    #[test]
+    fn session_affinity_key_falls_back_to_payload_user() {
+        let headers = HeaderMap::new();
+        let key = proxy_session_affinity_key(
+            &headers,
+            &json!({
+                "model": "gpt-5.5",
+                "user": "tenant-user-a"
+            }),
+        )
+        .expect("payload user should create an affinity key");
+
+        assert!(key.starts_with("p:"));
+        assert!(!key.contains("tenant-user-a"));
+    }
+
+    #[tokio::test]
+    async fn session_affinity_reorders_available_candidate_to_front() {
+        let context =
+            proxy_context_for_test(temp_proxy_data_dir(), Arc::new(tokio::sync::Mutex::new(())));
+        let first = proxy_candidate("first", "first", Some(10.0), Some(10.0), false);
+        let sticky = proxy_candidate("sticky", "sticky", Some(10.0), Some(10.0), false);
+
+        record_session_affinity(&context, Some("h:session"), &sticky, 100).await;
+        let (ordered, explanation) =
+            apply_session_affinity(&context, vec![first, sticky], Some("h:session"), 101, None)
+                .await;
+
+        assert_eq!(candidate_labels(&ordered), vec!["sticky", "first"]);
+        assert!(explanation.affinity_matched);
+        assert_eq!(explanation.affinity_skipped_reason, None);
+    }
+
+    #[tokio::test]
+    async fn session_affinity_falls_back_when_sticky_candidate_is_not_available() {
+        let context =
+            proxy_context_for_test(temp_proxy_data_dir(), Arc::new(tokio::sync::Mutex::new(())));
+        let ready = proxy_candidate("ready", "ready", Some(10.0), Some(10.0), false);
+        let sticky = proxy_candidate("sticky", "sticky", Some(10.0), Some(10.0), false);
+
+        record_session_affinity(&context, Some("h:session"), &sticky, 100).await;
+        let (ordered, explanation) =
+            apply_session_affinity(&context, vec![ready], Some("h:session"), 101, None).await;
+
+        assert_eq!(candidate_labels(&ordered), vec!["ready"]);
+        assert!(!explanation.affinity_matched);
+        assert_eq!(
+            explanation.affinity_skipped_reason.as_deref(),
+            Some("sticky_candidate_unavailable")
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_session_affinity_key_keeps_existing_candidate_order() {
+        let context =
+            proxy_context_for_test(temp_proxy_data_dir(), Arc::new(tokio::sync::Mutex::new(())));
+        let first = proxy_candidate("first", "first", Some(10.0), Some(10.0), false);
+        let second = proxy_candidate("second", "second", Some(10.0), Some(10.0), false);
+
+        let (ordered, explanation) =
+            apply_session_affinity(&context, vec![first, second], None, 100, None).await;
+
+        assert_eq!(candidate_labels(&ordered), vec!["first", "second"]);
+        assert!(!explanation.affinity_matched);
+        assert_eq!(
+            explanation.affinity_skipped_reason.as_deref(),
+            Some("missing_session_key")
+        );
+    }
+
+    #[tokio::test]
+    async fn session_affinity_recording_evicts_oldest_entries() {
+        let context =
+            proxy_context_for_test(temp_proxy_data_dir(), Arc::new(tokio::sync::Mutex::new(())));
+        let candidate = proxy_candidate("candidate", "candidate", Some(10.0), Some(10.0), false);
+
+        for index in 0..1100 {
+            record_session_affinity(
+                &context,
+                Some(&format!("h:session-{index}")),
+                &candidate,
+                index,
+            )
+            .await;
+        }
+
+        let snapshot = context.shared.lock().await;
+        assert!(snapshot.session_affinity.len() <= 1024);
+        assert!(!snapshot.session_affinity.contains_key("h:session-0"));
+        assert!(snapshot.session_affinity.contains_key("h:session-1099"));
     }
 
     #[tokio::test]

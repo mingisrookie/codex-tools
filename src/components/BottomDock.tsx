@@ -1,6 +1,5 @@
 import { useI18n } from "../i18n/I18nProvider";
-
-type AppTab = "accounts" | "proxy" | "dashboard" | "settings";
+import type { AppTab } from "../types/app";
 
 type BottomDockProps = {
   activeTab: AppTab;

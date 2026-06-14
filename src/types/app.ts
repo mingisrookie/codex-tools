@@ -1,5 +1,7 @@
 import type { AppLocale } from "../i18n/catalog";
 
+export type AppTab = "accounts" | "proxy" | "dashboard" | "settings";
+
 export type UsageWindow = {
   usedPercent: number;
   windowSeconds: number;
@@ -171,6 +173,23 @@ export type DashboardTimelineBucket = {
   firstChunkP95Ms: number | null;
 };
 
+export type DashboardRouteExplanation = {
+  strategy: string;
+  selectedAccountLabel: string | null;
+  selectedAccountId: string | null;
+  initialCandidateCount: number;
+  availableCandidateCount: number;
+  excludedByAuth: number;
+  excludedByUsage: number;
+  excludedByCooldown: number;
+  requestedAccountMatched: boolean;
+  affinityKeyPresent: boolean;
+  affinityMatched: boolean;
+  affinitySkippedReason: string | null;
+  cooldownApplied: boolean;
+  latencyPreferred: boolean;
+};
+
 export type DashboardMetricEvent = {
   finishedAt: number;
   endpoint: string;
@@ -186,6 +205,7 @@ export type DashboardMetricEvent = {
   downstreamStream: boolean | null;
   failureCategory: string | null;
   failureBrief: string | null;
+  routeExplanation: DashboardRouteExplanation | null;
   tokens: DashboardTokenUsage;
 };
 

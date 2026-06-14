@@ -32,6 +32,25 @@ pub(crate) struct DashboardTokenUsage {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub(crate) struct DashboardRouteExplanation {
+    pub(crate) strategy: String,
+    pub(crate) selected_account_label: Option<String>,
+    pub(crate) selected_account_id: Option<String>,
+    pub(crate) initial_candidate_count: usize,
+    pub(crate) available_candidate_count: usize,
+    pub(crate) excluded_by_auth: usize,
+    pub(crate) excluded_by_usage: usize,
+    pub(crate) excluded_by_cooldown: usize,
+    pub(crate) requested_account_matched: bool,
+    pub(crate) affinity_key_present: bool,
+    pub(crate) affinity_matched: bool,
+    pub(crate) affinity_skipped_reason: Option<String>,
+    pub(crate) cooldown_applied: bool,
+    pub(crate) latency_preferred: bool,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct DashboardMetricEvent {
     pub(crate) finished_at: i64,
@@ -48,6 +67,8 @@ pub(crate) struct DashboardMetricEvent {
     pub(crate) downstream_stream: Option<bool>,
     pub(crate) failure_category: Option<String>,
     pub(crate) failure_brief: Option<String>,
+    #[serde(default)]
+    pub(crate) route_explanation: Option<DashboardRouteExplanation>,
     pub(crate) tokens: DashboardTokenUsage,
 }
 
@@ -589,6 +610,7 @@ mod tests {
                 downstream_stream: Some(true),
                 failure_category: None,
                 failure_brief: None,
+                route_explanation: None,
                 tokens: DashboardTokenUsage {
                     input_tokens: 100,
                     cached_input_tokens: 25,
@@ -612,6 +634,7 @@ mod tests {
                 downstream_stream: Some(false),
                 failure_category: Some("auth_failed".to_string()),
                 failure_brief: Some("invalid api key".to_string()),
+                route_explanation: None,
                 tokens: DashboardTokenUsage::default(),
             },
         ];
@@ -658,6 +681,7 @@ mod tests {
             downstream_stream: Some(false),
             failure_category: Some("invalid_request".to_string()),
             failure_brief: Some("Unknown parameter: 'foo'.".to_string()),
+            route_explanation: None,
             tokens: DashboardTokenUsage::default(),
         };
 
@@ -675,6 +699,72 @@ mod tests {
         assert_eq!(
             value.get("failureBrief").and_then(Value::as_str),
             Some("Unknown parameter: 'foo'.")
+        );
+    }
+
+    #[test]
+    fn metric_event_serializes_route_explanation() {
+        let event = DashboardMetricEvent {
+            finished_at: 1,
+            endpoint: "/v1/responses".to_string(),
+            model: Some("gpt-5.5".to_string()),
+            account_label: Some("acct-a".to_string()),
+            status_code: Some(200),
+            error_kind: None,
+            total_ms: 42,
+            upstream_headers_ms: Some(20),
+            first_chunk_ms: Some(25),
+            stream_ms: Some(17),
+            request_bytes: Some(123),
+            downstream_stream: Some(false),
+            failure_category: None,
+            failure_brief: None,
+            route_explanation: Some(DashboardRouteExplanation {
+                strategy: "average".to_string(),
+                selected_account_label: Some("acct-a".to_string()),
+                selected_account_id: Some("abcd1234".to_string()),
+                initial_candidate_count: 3,
+                available_candidate_count: 2,
+                excluded_by_auth: 0,
+                excluded_by_usage: 1,
+                excluded_by_cooldown: 0,
+                requested_account_matched: false,
+                affinity_key_present: true,
+                affinity_matched: true,
+                affinity_skipped_reason: None,
+                cooldown_applied: false,
+                latency_preferred: true,
+            }),
+            tokens: DashboardTokenUsage::default(),
+        };
+
+        let value = serde_json::to_value(&event).expect("metric event should serialize");
+        let explanation = value
+            .get("routeExplanation")
+            .expect("route explanation should be present");
+        assert_eq!(
+            explanation
+                .get("selectedAccountLabel")
+                .and_then(Value::as_str),
+            Some("acct-a")
+        );
+        assert_eq!(
+            explanation.get("selectedAccountId").and_then(Value::as_str),
+            Some("abcd1234")
+        );
+        assert_eq!(
+            explanation
+                .get("initialCandidateCount")
+                .and_then(Value::as_u64),
+            Some(3)
+        );
+        assert_eq!(
+            explanation.get("affinityMatched").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            explanation.get("latencyPreferred").and_then(Value::as_bool),
+            Some(true)
         );
     }
 
@@ -730,6 +820,7 @@ mod tests {
                 downstream_stream: Some(false),
                 failure_category: None,
                 failure_brief: None,
+                route_explanation: None,
                 tokens: DashboardTokenUsage::default(),
             },
             DashboardMetricEvent {
@@ -747,6 +838,7 @@ mod tests {
                 downstream_stream: Some(true),
                 failure_category: None,
                 failure_brief: None,
+                route_explanation: None,
                 tokens: DashboardTokenUsage::default(),
             },
         ];
@@ -782,6 +874,7 @@ mod tests {
                 downstream_stream: Some(true),
                 failure_category: Some("client_disconnected".to_string()),
                 failure_brief: Some("client disconnected after first chunk".to_string()),
+                route_explanation: None,
                 tokens: DashboardTokenUsage::default(),
             },
             DashboardMetricEvent {
@@ -799,6 +892,7 @@ mod tests {
                 downstream_stream: Some(true),
                 failure_category: Some("client_disconnected".to_string()),
                 failure_brief: Some("client disconnected".to_string()),
+                route_explanation: None,
                 tokens: DashboardTokenUsage::default(),
             },
         ];

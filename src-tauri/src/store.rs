@@ -255,8 +255,7 @@ fn write_store_file(path: &Path, store: &AccountsStore) -> Result<(), String> {
     let parent = path
         .parent()
         .ok_or_else(|| format!("无法解析存储目录 {}", path.display()))?;
-    fs::create_dir_all(parent)
-        .map_err(|e| format!("创建存储目录失败 {}: {e}", parent.display()))?;
+    ensure_private_store_dir(parent)?;
 
     let serialized =
         serde_json::to_string_pretty(store).map_err(|e| format!("序列化账号存储失败: {e}"))?;
@@ -381,6 +380,12 @@ fn has_text(value: Option<&str>) -> bool {
         .is_some()
 }
 
+fn ensure_private_store_dir(path: &Path) -> Result<(), String> {
+    fs::create_dir_all(path).map_err(|e| format!("创建存储目录失败 {}: {e}", path.display()))?;
+    set_private_permissions(path);
+    Ok(())
+}
+
 fn write_file_atomically(path: &Path, contents: &[u8]) -> Result<(), String> {
     let parent = path
         .parent()
@@ -455,8 +460,7 @@ fn write_store_shadow_backups(path: &Path, contents: &[u8]) -> Result<(), String
     let parent = path
         .parent()
         .ok_or_else(|| format!("无法解析存储目录 {}", path.display()))?;
-    fs::create_dir_all(parent)
-        .map_err(|e| format!("创建存储目录失败 {}: {e}", parent.display()))?;
+    ensure_private_store_dir(parent)?;
 
     let latest_backup = parent.join(LAST_GOOD_BACKUP_FILE_NAME);
     let previous_backup = parent.join(PREVIOUS_GOOD_BACKUP_FILE_NAME);
@@ -633,8 +637,7 @@ fn backup_corrupted_store_file(path: &Path, raw: &str) -> Result<PathBuf, String
     let parent = path
         .parent()
         .ok_or_else(|| format!("无法解析存储目录 {}", path.display()))?;
-    fs::create_dir_all(parent)
-        .map_err(|e| format!("创建存储目录失败 {}: {e}", parent.display()))?;
+    ensure_private_store_dir(parent)?;
 
     let backup_path = parent.join(format!("accounts.corrupt-{}.json", now_unix_seconds()));
     fs::write(&backup_path, raw)
@@ -782,6 +785,24 @@ mod tests {
 
         assert_eq!(previous.accounts[0].label, "first");
         assert_eq!(latest.accounts[0].label, "second");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn save_store_sets_store_directory_private_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = temp_dir();
+        let store_path = dir.join("accounts.json");
+        save_store_to_path(&store_path, &sample_store("private", "workspace-1", 10))
+            .expect("save store");
+
+        let mode = fs::metadata(&dir)
+            .expect("read store dir metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700);
     }
 
     #[test]

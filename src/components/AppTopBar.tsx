@@ -1,10 +1,13 @@
 import { useEffect, useState } from "react";
 import { useI18n } from "../i18n/I18nProvider";
+import type { AppTab } from "../types/app";
 
 type AppTopBarProps = {
+  activeTab: AppTab;
   onRefresh: () => void;
   refreshing: boolean;
   onGoHome: () => void;
+  onSelectTab: (tab: AppTab) => void;
   showRefresh: boolean;
   usageRefreshIntervalMinutes: number;
   savingSettings: boolean;
@@ -40,9 +43,11 @@ function RefreshIcon({ spinning }: { spinning: boolean }) {
 }
 
 export function AppTopBar({
+  activeTab,
   onRefresh,
   refreshing,
   onGoHome,
+  onSelectTab,
   showRefresh,
   usageRefreshIntervalMinutes,
   savingSettings,
@@ -64,6 +69,12 @@ export function AppTopBar({
       onUsageRefreshIntervalChange(next);
     }
   };
+  const navItems: Array<{ tab: AppTab; label: string }> = [
+    { tab: "accounts", label: copy.bottomDock.accounts },
+    { tab: "proxy", label: copy.bottomDock.proxy },
+    { tab: "dashboard", label: copy.bottomDock.dashboard },
+    { tab: "settings", label: copy.bottomDock.settings },
+  ];
 
   return (
     <header className="topbar">
@@ -71,7 +82,22 @@ export function AppTopBar({
         <img className="appLogo" src="/codex-tools.png" alt={copy.topBar.logoAlt} />
         <h1>{copy.topBar.appTitle}</h1>
       </button>
-      <div className="topDragRegion" data-tauri-drag-region aria-hidden="true" />
+      <div className="topCenter">
+        <nav className="topNav" aria-label={copy.bottomDock.ariaLabel}>
+          {navItems.map((item) => (
+            <button
+              key={item.tab}
+              type="button"
+              className={`topNavButton${activeTab === item.tab ? " isActive" : ""}`}
+              onClick={() => onSelectTab(item.tab)}
+              aria-current={activeTab === item.tab ? "page" : undefined}
+            >
+              {item.label}
+            </button>
+          ))}
+        </nav>
+        <div className="topDragRegion" data-tauri-drag-region aria-hidden="true" />
+      </div>
       <div className="topActions">
         {showRefresh ? (
           <>

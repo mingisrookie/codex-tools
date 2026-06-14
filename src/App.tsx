@@ -1,11 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import "./App.css";
 import { ApiProxyPanel } from "./components/ApiProxyPanel";
 import { AddAccountSection } from "./components/AddAccountSection";
 import { AddAccountDialog } from "./components/AddAccountDialog";
 import { AccountsGrid } from "./components/AccountsGrid";
 import { AppTopBar } from "./components/AppTopBar";
-import { BottomDock } from "./components/BottomDock";
 import { DashboardPanel } from "./components/DashboardPanel";
 import { MetaStrip } from "./components/MetaStrip";
 import { NoticeBanner } from "./components/NoticeBanner";
@@ -13,13 +12,15 @@ import { RemoteDeployProgressToast } from "./components/RemoteDeployProgressToas
 import { SettingsPanel } from "./components/SettingsPanel";
 import { UpdateBanner } from "./components/UpdateBanner";
 import { useCodexController } from "./hooks/useCodexController";
+import { useI18n } from "./i18n/I18nProvider";
 import { useThemeMode } from "./hooks/useThemeMode";
-
-type AppTab = "accounts" | "proxy" | "dashboard" | "settings";
+import type { AppTab } from "./types/app";
+import { buildAccountOverview } from "./utils/accountOverview";
 
 function App() {
     const [activeTab, setActiveTab] = useState<AppTab>("accounts");
     const { themeMode, toggleTheme } = useThemeMode();
+    const { copy } = useI18n();
     const {
         accounts,
         tokenUsage,
@@ -146,15 +147,21 @@ function App() {
         void refreshUsage(false);
         void refreshTokenUsage(false);
     };
+    const accountOverview = useMemo(
+        () => buildAccountOverview(accounts, copy.accountsPage.none),
+        [accounts, copy.accountsPage.none],
+    );
 
     return (
         <div className="shell">
             <div className="ambient" />
             <main className="panel">
                 <AppTopBar
+                    activeTab={activeTab}
                     onRefresh={refreshAccountsView}
                     refreshing={refreshing || refreshingTokenUsage}
                     onGoHome={() => setActiveTab("accounts")}
+                    onSelectTab={setActiveTab}
                     showRefresh={activeTab === "accounts"}
                     usageRefreshIntervalMinutes={settings.usageRefreshIntervalMinutes}
                     savingSettings={savingSettings}
@@ -197,18 +204,41 @@ function App() {
                 <section className="viewStage">
                     {activeTab === "accounts" ? (
                         <div className="accountsPage">
-                            <div className="accountsHero">
+                            <div className="accountsHero accountsHeroPanel">
+                                <div className="accountsHeroCopy">
+                                    <p className="sectionKicker">{copy.bottomDock.accounts}</p>
+                                    <h2>{copy.accountsPage.title}</h2>
+                                    <p>{copy.accountsPage.subtitle}</p>
+                                </div>
+                                <AddAccountSection
+                                    onOpenAddDialog={onOpenAddDialog}
+                                    onSmartSwitch={() => void onSmartSwitch()}
+                                    smartSwitching={smartSwitching}
+                                />
+                                <div className="accountsOverviewGrid">
+                                    <article className="accountsOverviewCard isAccent">
+                                        <span>{copy.accountsPage.total}</span>
+                                        <strong>{accountOverview.total}</strong>
+                                    </article>
+                                    <article className="accountsOverviewCard">
+                                        <span>{copy.accountsPage.active}</span>
+                                        <strong>{accountOverview.active}</strong>
+                                    </article>
+                                    <article className="accountsOverviewCard">
+                                        <span>{copy.accountsPage.exhausted}</span>
+                                        <strong>{accountOverview.exhausted}</strong>
+                                    </article>
+                                    <article className={`accountsOverviewCard${accountOverview.attention > 0 ? " isWarning" : ""}`}>
+                                        <span>{copy.accountsPage.attention}</span>
+                                        <strong>{accountOverview.attention}</strong>
+                                    </article>
+                                </div>
                                 <MetaStrip
                                     accountCount={accounts.length}
                                     tokenUsage={tokenUsage}
                                     tokenUsageError={tokenUsageError}
                                     exportingAccounts={exportingAccounts}
                                     onExportAccounts={() => void onExportAccounts()}
-                                />
-                                <AddAccountSection
-                                    onOpenAddDialog={onOpenAddDialog}
-                                    onSmartSwitch={() => void onSmartSwitch()}
-                                    smartSwitching={smartSwitching}
                                 />
                             </div>
                             <AccountsGrid
@@ -333,10 +363,6 @@ function App() {
                         />
                     )}
                 </section>
-                <BottomDock
-                    activeTab={activeTab}
-                    onSelectTab={setActiveTab}
-                />
             </main>
         </div>
     );

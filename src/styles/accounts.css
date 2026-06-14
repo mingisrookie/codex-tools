@@ -1,3 +1,513 @@
+.accountsWorkspace {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 380px);
+  gap: 14px;
+  overflow: hidden;
+}
+
+.accountsTablePanel,
+.accountInspectorPanel {
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid color-mix(in srgb, var(--line) 88%, transparent);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--card) 95%, var(--surface-tint) 5%);
+  box-shadow:
+    0 1px 2px rgba(28, 43, 68, 0.05),
+    0 10px 18px rgba(28, 43, 68, 0.04);
+}
+
+.accountsTablePanel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+}
+
+.accountsTableHeader {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 18px 14px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 86%, transparent);
+}
+
+.accountsTableHeader h3 {
+  margin: 4px 0 0;
+  font: 720 1.1rem/1.15 var(--font-ui);
+  letter-spacing: -0.03em;
+}
+
+.accountsTableHeader span {
+  display: block;
+  margin-top: 5px;
+  color: var(--subtle);
+  font: 520 0.78rem/1.45 var(--font-ui);
+}
+
+.accountsTableHeader > strong {
+  min-width: 34px;
+  min-height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--brand-cool) 24%, var(--line) 76%);
+  background: color-mix(in srgb, var(--brand-cool) 8%, transparent);
+  color: color-mix(in srgb, var(--brand-cool) 78%, var(--ink) 22%);
+  font: 760 0.82rem/1 var(--font-mono);
+}
+
+.accountsTableScroll {
+  min-height: 0;
+  overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--subtle) 28%, transparent) transparent;
+}
+
+.accountsTableScroll::-webkit-scrollbar,
+.accountInspectorPanel::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.accountsTableScroll::-webkit-scrollbar-track,
+.accountInspectorPanel::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.accountsTableScroll::-webkit-scrollbar-thumb,
+.accountInspectorPanel::-webkit-scrollbar-thumb {
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--subtle) 24%, transparent);
+}
+
+.accountsTable {
+  width: 100%;
+  min-width: 760px;
+  border-collapse: separate;
+  border-spacing: 0;
+}
+
+.accountsTable th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 10px 14px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 90%, transparent);
+  background: color-mix(in srgb, var(--card) 96%, var(--surface-tint) 4%);
+  color: var(--subtle);
+  font: 720 0.66rem/1 var(--font-ui);
+  letter-spacing: 0.05em;
+  text-align: left;
+  text-transform: uppercase;
+}
+
+.accountsTable td {
+  padding: 12px 14px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 82%, transparent);
+  vertical-align: middle;
+}
+
+.accountsTableRow {
+  cursor: pointer;
+  outline: none;
+  transition: background 160ms ease, box-shadow 160ms ease;
+}
+
+.accountsTableRow:hover,
+.accountsTableRow:focus-visible {
+  background: color-mix(in srgb, var(--surface-hover-bg) 62%, transparent);
+}
+
+.accountsTableRow.isSelected {
+  background: color-mix(in srgb, var(--brand-cool) 7%, transparent);
+  box-shadow: inset 3px 0 color-mix(in srgb, var(--brand-cool) 72%, var(--line) 28%);
+}
+
+.accountsTableRow.isDisabled {
+  opacity: 0.6;
+}
+
+.accountIdentityCell {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.accountIdentityCell strong {
+  min-width: 0;
+  max-width: 220px;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 680 0.88rem/1.2 var(--font-ui);
+}
+
+.accountIdentityCell > span,
+.accountProxyCell span {
+  min-width: 0;
+  color: var(--subtle);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 560 0.72rem/1.2 var(--font-ui);
+}
+
+.accountIdentityBadges,
+.accountInspectorBadges {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.accountPlanBadge,
+.accountStateBadge,
+.accountStatusChip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 23px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--line) 82%, transparent);
+  padding: 0 9px;
+  font: 720 0.62rem/1 var(--font-ui);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.accountPlanBadge.tone-team,
+.accountPlanBadge.tone-api {
+  color: #0f6f68;
+  border-color: rgba(56, 190, 178, 0.3);
+  background: rgba(118, 231, 221, 0.14);
+}
+
+.accountPlanBadge.tone-pro {
+  color: #7d3f13;
+  border-color: rgba(226, 131, 60, 0.28);
+  background: rgba(255, 164, 95, 0.12);
+}
+
+.accountPlanBadge.tone-plus {
+  color: #5f4294;
+  border-color: rgba(158, 122, 242, 0.28);
+  background: rgba(191, 151, 255, 0.12);
+}
+
+.accountPlanBadge.tone-free,
+.accountPlanBadge.tone-unknown {
+  color: #4f5f7c;
+  border-color: rgba(135, 147, 174, 0.28);
+  background: rgba(187, 197, 219, 0.12);
+}
+
+.accountPlanBadge.tone-enterprise,
+.accountPlanBadge.tone-business {
+  color: #5e4c12;
+  border-color: rgba(223, 190, 91, 0.3);
+  background: rgba(255, 225, 134, 0.13);
+}
+
+:root[data-theme="dark"] .accountPlanBadge.tone-team,
+:root[data-theme="dark"] .accountPlanBadge.tone-api {
+  color: #c5fff8;
+  border-color: rgba(89, 226, 212, 0.66);
+  background: rgba(55, 193, 178, 0.24);
+}
+
+:root[data-theme="dark"] .accountPlanBadge.tone-pro {
+  color: #ffe0c7;
+  border-color: rgba(255, 170, 115, 0.68);
+  background: rgba(219, 118, 54, 0.26);
+}
+
+:root[data-theme="dark"] .accountPlanBadge.tone-plus {
+  color: #f0e0ff;
+  border-color: rgba(181, 146, 255, 0.7);
+  background: rgba(130, 95, 219, 0.26);
+}
+
+:root[data-theme="dark"] .accountPlanBadge.tone-free,
+:root[data-theme="dark"] .accountPlanBadge.tone-unknown {
+  color: #e4ebff;
+  border-color: rgba(168, 182, 220, 0.64);
+  background: rgba(120, 133, 168, 0.26);
+}
+
+.accountStateBadge.isCurrent {
+  color: #7d5600;
+  border-color: rgba(212, 165, 36, 0.28);
+  background: rgba(255, 237, 148, 0.2);
+}
+
+.accountStatusChip.tone-ok {
+  color: color-mix(in srgb, var(--brand-cool) 70%, var(--ink) 30%);
+  border-color: color-mix(in srgb, var(--brand-cool) 28%, var(--line) 72%);
+  background: color-mix(in srgb, var(--brand-cool) 8%, transparent);
+}
+
+.accountStatusChip.tone-warn {
+  color: #9a570f;
+  border-color: rgba(245, 158, 11, 0.3);
+  background: rgba(245, 158, 11, 0.1);
+}
+
+.accountStatusChip.tone-danger {
+  color: var(--error-text);
+  border-color: color-mix(in srgb, var(--danger) 32%, var(--line) 68%);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+}
+
+.accountStatusChip.tone-muted {
+  color: var(--subtle);
+  background: color-mix(in srgb, var(--surface-hover-bg) 58%, transparent);
+}
+
+.accountUsageInline {
+  min-width: 210px;
+  display: grid;
+  gap: 8px;
+}
+
+.accountUsageMeter {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.accountUsageMeterHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.accountUsageMeterHeader span {
+  color: var(--subtle);
+  font: 650 0.67rem/1 var(--font-ui);
+}
+
+.accountUsageMeterHeader strong {
+  color: var(--ink);
+  font: 720 0.7rem/1 var(--font-mono);
+}
+
+.accountUsageTrack {
+  height: 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--bar-track) 82%, var(--surface-tint) 18%);
+  overflow: hidden;
+}
+
+.accountUsageTrack span {
+  display: block;
+  width: var(--value);
+  height: 100%;
+  border-radius: inherit;
+  background: color-mix(in srgb, var(--brand-cool) 82%, var(--surface-tint) 18%);
+}
+
+.accountUsageMeter.tone-warn .accountUsageTrack span {
+  background: rgba(245, 158, 11, 0.86);
+}
+
+.accountUsageMeter.tone-danger .accountUsageTrack span {
+  background: var(--danger);
+}
+
+.accountUsageMeter.tone-muted .accountUsageTrack span {
+  background: color-mix(in srgb, var(--subtle) 50%, transparent);
+}
+
+.accountUsageMeter p {
+  margin: 0;
+  color: var(--subtle);
+  font: 560 0.67rem/1.25 var(--font-ui);
+}
+
+.accountProxyCell {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.accountProxyCell strong {
+  color: var(--ink);
+  font: 650 0.76rem/1.2 var(--font-ui);
+}
+
+.accountRowActions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.accountRowButton {
+  min-height: 30px;
+  padding: 0 12px;
+  border-radius: 9px;
+  font-size: 0.72rem;
+}
+
+.accountInspectorPanel {
+  padding: 16px;
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: color-mix(in srgb, var(--subtle) 28%, transparent) transparent;
+}
+
+.accountInspectorHero {
+  display: grid;
+  gap: 12px;
+}
+
+.accountInspectorHero h3 {
+  margin: 5px 0 0;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 730 1.16rem/1.2 var(--font-ui);
+  letter-spacing: -0.03em;
+}
+
+.accountInspectorAliasEditor input {
+  width: 100%;
+  min-height: 38px;
+  border: 1px solid color-mix(in srgb, var(--line) 84%, var(--surface-tint) 16%);
+  border-radius: 10px;
+  padding: 0 12px;
+  background: color-mix(in srgb, var(--card) 90%, var(--surface-tint) 10%);
+  color: var(--ink);
+  font: 650 0.86rem/1 var(--font-ui);
+}
+
+.accountInspectorActions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.accountInspectorActions button {
+  min-width: 0;
+  min-height: 34px;
+  padding: 0 10px;
+  border-radius: 10px;
+  font-size: 0.74rem;
+}
+
+.accountInspectorActions button:first-child {
+  grid-column: 1 / -1;
+}
+
+.dangerButton {
+  border-color: color-mix(in srgb, var(--danger) 28%, var(--line) 72%);
+  background: var(--button-danger-bg);
+}
+
+.dangerButton.isPending {
+  color: var(--error-text);
+  border-color: color-mix(in srgb, var(--danger) 42%, var(--line) 58%);
+  background: color-mix(in srgb, var(--danger) 13%, transparent);
+}
+
+.accountInspectorSection {
+  min-width: 0;
+  display: grid;
+  gap: 10px;
+  border: 1px solid color-mix(in srgb, var(--line) 84%, transparent);
+  border-radius: 14px;
+  padding: 13px;
+  background: color-mix(in srgb, var(--meta-bg) 36%, transparent);
+}
+
+.accountInspectorSection h4 {
+  margin: 0;
+  font: 720 0.76rem/1 var(--font-ui);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.accountInspectorUsage {
+  display: grid;
+  gap: 12px;
+}
+
+.accountInspectorDetails {
+  margin: 0;
+  display: grid;
+  gap: 9px;
+}
+
+.accountInspectorDetails div {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(86px, 0.42fr) minmax(0, 1fr);
+  gap: 12px;
+  align-items: baseline;
+}
+
+.accountInspectorDetails dt {
+  color: var(--subtle);
+  font: 660 0.68rem/1.2 var(--font-ui);
+}
+
+.accountInspectorDetails dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+  font: 620 0.74rem/1.35 var(--font-ui);
+}
+
+.accountInspectorErrors {
+  display: grid;
+  gap: 8px;
+}
+
+.accountInspectorErrors p {
+  margin: 0;
+  border-radius: 10px;
+  padding: 9px 10px;
+  background: color-mix(in srgb, var(--danger) 9%, transparent);
+  color: var(--error-text);
+  font: 540 0.72rem/1.35 var(--font-ui);
+  overflow-wrap: anywhere;
+}
+
+.accountInspectorEmpty {
+  min-height: 220px;
+  display: grid;
+  place-content: center;
+  gap: 8px;
+  text-align: center;
+  color: var(--subtle);
+}
+
+.accountInspectorEmpty h3 {
+  margin: 0;
+  color: var(--ink);
+  font: 700 1rem/1.2 var(--font-ui);
+}
+
+.accountInspectorEmpty p {
+  margin: 0 auto;
+  max-width: 28ch;
+  font: 520 0.78rem/1.5 var(--font-ui);
+}
+
+.accountsWorkspace .emptyState {
+  width: auto;
+  min-height: 260px;
+  grid-column: 1 / -1;
+}
+
 .cards {
   margin-top: 0;
   display: grid;

@@ -5,13 +5,9 @@
 .shell {
   height: 100dvh;
   min-height: 100vh;
-  padding: 16px 18px calc(env(safe-area-inset-bottom, 0px) + 18px);
+  padding: 14px 18px calc(env(safe-area-inset-bottom, 0px) + 14px);
   color: var(--ink);
-  background:
-    radial-gradient(72% 60% at 6% 0%, var(--glow-hot) 0%, transparent 58%),
-    radial-gradient(64% 52% at 95% 6%, var(--glow-cool) 0%, transparent 54%),
-    radial-gradient(58% 48% at 50% 32%, var(--glow-neutral) 0%, transparent 68%),
-    linear-gradient(180deg, var(--shell-top) 0%, var(--shell-mid) 48%, var(--shell-bottom) 100%);
+  background: linear-gradient(180deg, var(--shell-top) 0%, var(--shell-bottom) 100%);
   position: relative;
   overflow: hidden;
   transition: background 220ms ease, color 220ms ease;
@@ -26,12 +22,7 @@
 }
 
 .shell::before {
-  background:
-    radial-gradient(44% 38% at 18% 14%, var(--shell-glow-a), transparent 72%),
-    radial-gradient(36% 30% at 84% 12%, var(--shell-glow-b), transparent 72%),
-    radial-gradient(52% 44% at 56% 86%, var(--shell-glow-c), transparent 78%);
-  filter: blur(26px);
-  opacity: 0.9;
+  content: none;
 }
 
 .shell::after {
@@ -39,20 +30,7 @@
 }
 
 .ambient {
-  position: fixed;
-  inset: 0;
-  pointer-events: none;
-  opacity: 0.07;
-  background-image:
-    repeating-linear-gradient(
-      -38deg,
-      var(--ambient-line) 0,
-      var(--ambient-line) 1px,
-      transparent 1px,
-      transparent 14px
-    ),
-    linear-gradient(180deg, rgba(255, 255, 255, 0.06), transparent 35%);
-  mix-blend-mode: soft-light;
+  display: none;
 }
 
 .panel {
@@ -84,7 +62,7 @@
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 14px;
-  padding: 24px 6px 24px;
+  padding: 12px 6px 14px;
   border-bottom: 1px solid color-mix(in srgb, var(--line) 78%, var(--surface-tint) 22%);
   cursor: default;
 }
@@ -168,6 +146,62 @@
 
 .topDragRegion:active {
   cursor: grabbing;
+}
+
+.topCenter {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(80px, 1fr);
+  align-items: center;
+  gap: 12px;
+}
+
+.topNav {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  width: fit-content;
+  max-width: 100%;
+  padding: 4px;
+  border: 1px solid color-mix(in srgb, var(--line) 78%, var(--surface-tint) 22%);
+  border-radius: 999px;
+  background:
+    linear-gradient(
+      180deg,
+      color-mix(in srgb, var(--meta-bg) 70%, var(--surface-tint) 30%),
+      color-mix(in srgb, var(--meta-bg) 44%, transparent)
+    );
+  box-shadow: inset 0 1px var(--surface-highlight-soft);
+  overflow: auto;
+  scrollbar-width: none;
+}
+
+.topNav::-webkit-scrollbar {
+  display: none;
+}
+
+.topNavButton {
+  min-height: 32px;
+  border: 0;
+  border-radius: 999px;
+  padding: 0 13px;
+  background: transparent;
+  color: var(--subtle);
+  box-shadow: none;
+  font: 700 0.76rem/1 var(--font-ui);
+  white-space: nowrap;
+}
+
+.topNavButton:hover {
+  transform: none;
+  background: color-mix(in srgb, var(--surface-hover-bg) 60%, transparent);
+  box-shadow: none;
+}
+
+.topNavButton.isActive {
+  color: color-mix(in srgb, var(--brand-cool) 76%, var(--ink) 24%);
+  background: color-mix(in srgb, var(--brand-cool) 10%, var(--surface-tint) 90%);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--brand-cool) 26%, transparent);
 }
 
 .topActions {
@@ -261,7 +295,7 @@
 
 .viewStage {
   --page-shell-width: 1152px;
-  margin-top: 24px;
+  margin-top: 14px;
   min-height: 0;
   flex: 1;
   display: flex;
@@ -284,12 +318,12 @@
 }
 
 .accountsPage {
-  width: min(var(--page-shell-width, 1152px), 100%);
+  width: min(1260px, 100%);
   margin: 0 auto;
-  padding: 10px 24px 32px;
+  padding: 6px 18px 28px;
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
-  gap: 20px;
+  gap: 14px;
   align-content: stretch;
   overflow: hidden;
 }
@@ -299,6 +333,136 @@
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 12px;
   align-items: center;
+}
+
+.accountsHeroPanel {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: stretch;
+  padding: 14px;
+  border: 1px solid color-mix(in srgb, var(--line) 88%, transparent);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--card) 94%, var(--surface-tint) 6%);
+  box-shadow: 0 8px 20px rgba(18, 34, 56, 0.055);
+}
+
+.accountsHeroCopy {
+  min-width: 0;
+  display: grid;
+  align-content: center;
+  gap: 6px;
+}
+
+.accountsHeroCopy h2 {
+  margin: 0;
+  font: 740 clamp(1.15rem, 1.8vw, 1.48rem)/1.08 var(--font-ui);
+  letter-spacing: -0.04em;
+}
+
+.accountsHeroCopy p {
+  margin: 0;
+  max-width: 62ch;
+  color: var(--subtle);
+  font: 520 0.8rem/1.45 var(--font-ui);
+}
+
+.accountsOverviewGrid {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.accountsOverviewCard,
+.accountsInspectorCard {
+  min-width: 0;
+  border: 1px solid color-mix(in srgb, var(--line) 86%, transparent);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--meta-bg) 38%, transparent);
+  box-shadow: inset 0 1px var(--surface-highlight-soft);
+}
+
+.accountsOverviewCard {
+  display: grid;
+  gap: 6px;
+  padding: 10px 12px;
+}
+
+.accountsOverviewCard span,
+.accountsInspectorCard span,
+.accountsInspectorCard dt {
+  color: var(--subtle);
+  font: 700 0.68rem/1 var(--font-ui);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.accountsOverviewCard strong {
+  color: var(--ink);
+  font: 760 1.28rem/1 var(--font-ui);
+  letter-spacing: -0.04em;
+}
+
+.accountsOverviewCard.isAccent {
+  border-color: color-mix(in srgb, var(--brand-cool) 42%, var(--line) 58%);
+  background: color-mix(in srgb, var(--brand-cool) 8%, var(--card) 92%);
+}
+
+.accountsOverviewCard.isWarning strong {
+  color: var(--error-text);
+}
+
+.accountsInspectorCard {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(220px, 0.7fr) minmax(0, 1.3fr);
+  gap: 14px;
+  padding: 14px;
+  align-items: center;
+}
+
+.accountsInspectorCard > div {
+  min-width: 0;
+  display: grid;
+  gap: 7px;
+}
+
+.accountsInspectorCard strong {
+  min-width: 0;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 720 1rem/1.2 var(--font-ui);
+}
+
+.accountsInspectorCard dl {
+  margin: 0;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.accountsInspectorCard dl div {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+  padding: 10px;
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--surface-hover-bg) 44%, transparent);
+}
+
+.accountsInspectorCard dd {
+  margin: 0;
+  min-width: 0;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font: 700 0.84rem/1.2 var(--font-ui);
+}
+
+.accountsHeroPanel .metaStrip {
+  grid-column: 1 / -1;
 }
 
 @keyframes riseIn {

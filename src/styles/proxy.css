@@ -19,6 +19,33 @@
   padding-inline: 24px;
 }
 
+.proxyHero {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 18px;
+  min-height: 104px;
+  background: color-mix(in srgb, var(--card) 94%, var(--surface-tint) 6%);
+}
+
+.proxyHeroCopy {
+  min-width: 0;
+  display: grid;
+  gap: 7px;
+}
+
+.proxyHeroCopy h2 {
+  margin: 0;
+  font: 760 clamp(1.35rem, 2.5vw, 2.2rem)/1.04 var(--font-ui);
+  letter-spacing: -0.055em;
+}
+
+.proxyHeroCopy p {
+  margin: 0;
+  max-width: 66ch;
+  color: var(--subtle);
+  font: 520 0.86rem/1.55 var(--font-ui);
+}
+
 .proxyHeaderStats {
   display: flex;
   align-items: center;
@@ -83,11 +110,11 @@
   gap: 14px;
   padding: 16px 18px 18px;
   border: 1px solid var(--section-line);
-  border-radius: 24px;
-  background: var(--section-card-surface);
-  box-shadow: var(--section-shadow);
-  backdrop-filter: blur(14px) saturate(112%);
-  -webkit-backdrop-filter: blur(14px) saturate(112%);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--card) 94%, var(--surface-tint) 6%);
+  box-shadow: 0 8px 20px rgba(18, 34, 56, 0.055);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
 .proxyUsageCard {
@@ -95,11 +122,11 @@
   gap: 16px;
   padding: 16px 18px 18px;
   border: 1px solid var(--section-line);
-  background: var(--section-card-surface);
-  box-shadow: var(--section-shadow);
+  background: color-mix(in srgb, var(--card) 94%, var(--surface-tint) 6%);
+  box-shadow: 0 8px 20px rgba(18, 34, 56, 0.055);
   cursor: context-menu;
-  backdrop-filter: blur(14px) saturate(112%);
-  -webkit-backdrop-filter: blur(14px) saturate(112%);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
 }
 
 .proxyUsageHeader {
@@ -726,10 +753,10 @@
   min-width: 0;
   overflow: hidden;
   border: 1px solid var(--section-line);
-  border-radius: 22px;
-  background: var(--section-card-surface);
-  box-shadow: var(--section-shadow);
-  backdrop-filter: blur(14px) saturate(108%);
+  border-radius: 18px;
+  background: color-mix(in srgb, var(--card) 94%, var(--surface-tint) 6%);
+  box-shadow: 0 8px 20px rgba(18, 34, 56, 0.055);
+  backdrop-filter: none;
 }
 
 .dashboardHero > *,
@@ -742,8 +769,8 @@
 .dashboardHeroPanel {
   display: grid;
   gap: 16px;
-  padding: 18px;
-  background: var(--section-card-primary-surface);
+  padding: 16px;
+  background: color-mix(in srgb, var(--card) 96%, var(--surface-tint) 4%);
 }
 
 .dashboardHeroTop {
@@ -767,8 +794,8 @@
 
 .dashboardHero h2 {
   color: var(--ink);
-  font: 760 1.55rem/1.08 var(--font-ui);
-  letter-spacing: -0.045em;
+  font: 740 1.34rem/1.1 var(--font-ui);
+  letter-spacing: -0.035em;
 }
 
 .dashboardHero p,
@@ -861,11 +888,11 @@
   display: grid;
   align-content: space-between;
   gap: 10px;
-  min-height: 118px;
-  padding: 15px 15px 13px;
+  min-height: 92px;
+  padding: 13px 14px 12px;
   border: 1px solid color-mix(in srgb, var(--line) 80%, var(--surface-tint) 20%);
-  border-radius: 18px;
-  background: color-mix(in srgb, var(--card) 76%, var(--surface-tint) 24%);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--card) 92%, var(--surface-tint) 8%);
   box-shadow:
     0 8px 18px rgba(19, 34, 58, 0.04),
     inset 0 1px var(--surface-highlight-soft);
@@ -973,10 +1000,8 @@
   display: grid;
   min-height: 318px;
   border: 1px solid color-mix(in srgb, var(--line) 78%, transparent);
-  border-radius: 18px;
-  background:
-    linear-gradient(180deg, color-mix(in srgb, var(--meta-bg) 30%, transparent), color-mix(in srgb, var(--card) 18%, transparent)),
-    color-mix(in srgb, var(--app-bg, var(--body-bg)) 76%, transparent);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--app-bg, var(--body-bg)) 84%, var(--card) 16%);
   box-shadow: inset 0 1px var(--surface-highlight-faint);
   --dashboard-bar-start: #2d8cff;
   --dashboard-bar-end: rgba(47, 210, 200, 0.34);
@@ -1067,7 +1092,7 @@
 }
 
 .legendBar {
-  background: linear-gradient(90deg, #2d8cff, #2fd2c8);
+  background: #0f8b86;
 }
 
 .legendFail {
@@ -1076,7 +1101,60 @@
 
 .legendLine {
   height: 3px !important;
-  background: linear-gradient(90deg, #7c3aed, #f59e0b);
+  background: #8b6f2a;
+}
+
+.dashboardFilterBar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  align-items: center;
+  padding: 13px 14px;
+  border: 1px solid color-mix(in srgb, var(--line) 86%, transparent);
+  border-radius: 16px;
+  background: color-mix(in srgb, var(--card) 94%, var(--surface-tint) 6%);
+  box-shadow: 0 6px 16px rgba(18, 34, 56, 0.04);
+}
+
+.dashboardFilterBar strong {
+  display: block;
+  color: var(--ink);
+  font: 700 0.9rem/1.2 var(--font-ui);
+}
+
+.dashboardFilterBar p {
+  margin: 3px 0 0;
+  color: var(--subtle);
+  font: 500 0.76rem/1.4 var(--font-ui);
+}
+
+.dashboardFilterControls {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.dashboardFilterField {
+  display: grid;
+  gap: 5px;
+  min-width: 138px;
+}
+
+.dashboardFilterField span {
+  color: var(--subtle);
+  font: 650 0.66rem/1 var(--font-ui);
+}
+
+.dashboardFilterField select {
+  height: 34px;
+  min-width: 0;
+  border: 1px solid color-mix(in srgb, var(--line) 86%, transparent);
+  border-radius: 10px;
+  padding: 0 30px 0 10px;
+  background: color-mix(in srgb, var(--card) 96%, var(--surface-tint) 4%);
+  color: var(--ink);
+  font: 600 0.75rem/1 var(--font-ui);
 }
 
 .dashboardColumns {
@@ -1107,8 +1185,8 @@
   display: grid;
   gap: 8px;
   padding: 10px 11px;
-  border-radius: 14px;
-  background: color-mix(in srgb, var(--meta-bg) 48%, transparent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--meta-bg) 34%, transparent);
   color: var(--subtle);
   box-shadow: inset 0 1px var(--surface-highlight-faint);
 }
@@ -1149,7 +1227,7 @@
   inset: 0 auto 0 0;
   display: block;
   border-radius: inherit;
-  background: linear-gradient(90deg, #2d8cff, #2fd2c8);
+  background: #0f8b86;
 }
 
 .dashboardRankMeta small {
@@ -1180,7 +1258,7 @@
 
 .dashboardTable {
   width: 100%;
-  min-width: 760px;
+  min-width: 1040px;
   border-collapse: collapse;
   font: 600 0.75rem/1.35 var(--font-ui);
 }
@@ -1205,6 +1283,17 @@
   overflow-wrap: anywhere;
   color: var(--subtle);
   font-weight: 620;
+}
+
+.dashboardTable td.dashboardRouteCell {
+  min-width: 260px;
+  max-width: 360px;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: initial;
+  overflow-wrap: anywhere;
+  color: color-mix(in srgb, var(--ink) 72%, var(--brand-cool) 28%);
+  font: 650 0.72rem/1.45 var(--font-ui);
 }
 
 .dashboardTable tr:last-child td {
@@ -1284,6 +1373,18 @@
   background: color-mix(in srgb, var(--error-bg, #fee2e2) 32%, transparent);
   color: var(--ink);
   font: 600 0.68rem/1.45 var(--font-mono, ui-monospace, SFMono-Regular, Consolas, monospace);
+}
+
+.dashboardRouteMessage {
+  grid-column: 1 / -1;
+  margin: 2px 0 0;
+  padding: 9px 10px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--brand-cool) 10%, transparent);
+  color: color-mix(in srgb, var(--ink) 78%, var(--brand-cool) 22%);
+  font: 650 0.68rem/1.45 var(--font-mono, ui-monospace, SFMono-Regular, Consolas, monospace);
 }
 
 .dashboardEmptyState {
@@ -2408,13 +2509,19 @@ button.bottomDockButton.isActive:focus-visible {
   }
 
   .dashboardHeroTop,
-  .dashboardSectionHeader {
+  .dashboardSectionHeader,
+  .dashboardFilterBar {
     grid-template-columns: 1fr;
   }
 
   .dashboardHeroActions,
-  .dashboardSectionActions {
+  .dashboardSectionActions,
+  .dashboardFilterControls {
     justify-content: flex-start;
+  }
+
+  .dashboardFilterField {
+    min-width: min(100%, 180px);
   }
 
   .dashboardStatsGrid,

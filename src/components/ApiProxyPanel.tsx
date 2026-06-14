@@ -1984,6 +1984,29 @@ export function ApiProxyPanel({
   return (
     <section className="proxyPage">
       <div className="proxyShell">
+        <section className="proxyHero proxySectionCard">
+          <div className="proxyHeroCopy">
+            <p className="sectionKicker">{proxyCopy.kicker}</p>
+            <h2>{proxyCopy.title}</h2>
+            <p>{proxyCopy.hint}</p>
+          </div>
+          <div className="proxyHeaderStats">
+            <span className="proxyHeaderStat">
+              <span className={`proxyStatusDot${status.running ? " isRunning" : ""}`} aria-hidden="true" />
+              <span>{proxyCopy.statusLabel}</span>
+              <strong>{status.running ? proxyCopy.statusRunning : proxyCopy.statusStopped}</strong>
+            </span>
+            <span className="proxyHeaderStat">
+              <span>{proxyCopy.portLabel}</span>
+              <strong>{status.port ?? effectivePort ?? "--"}</strong>
+            </span>
+            <span className="proxyHeaderStat">
+              <span>{proxyCopy.accountCountLabel}</span>
+              <strong>{accountCount}</strong>
+            </span>
+          </div>
+        </section>
+
         <ApiProxyUsageChart
           copy={proxyCopy}
           locale={locale}
@@ -1999,22 +2022,6 @@ export function ApiProxyPanel({
         />
 
         <section className="proxySectionCard proxySectionCardPrimary">
-          <div className="proxyHeaderStats">
-            <span className="proxyHeaderStat">
-              <span className={`proxyStatusDot${status.running ? " isRunning" : ""}`} aria-hidden="true" />
-              <span>{proxyCopy.statusLabel}</span>
-              <strong>{status.running ? proxyCopy.statusRunning : proxyCopy.statusStopped}</strong>
-            </span>
-            <span className="proxyHeaderStat">
-              <span>{proxyCopy.portLabel}</span>
-              <strong>{status.port ?? "--"}</strong>
-            </span>
-            <span className="proxyHeaderStat">
-              <span>{proxyCopy.accountCountLabel}</span>
-              <strong>{accountCount}</strong>
-            </span>
-          </div>
-
           <div className="proxyControlRow">
             <label className="proxyCompactField">
               <span>{proxyCopy.portLabel}</span>

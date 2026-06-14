@@ -7,9 +7,21 @@ import type {
   DashboardWindowStats,
   RuntimeDataInfo,
 } from "../types/app";
-import { useState, type ReactNode } from "react";
+import { useMemo, useState, type ReactNode } from "react";
+import { useI18n } from "../i18n/I18nProvider";
+import type { MessageCatalog } from "../i18n/catalog";
 import { buildTimelineChart } from "../utils/dashboardAxis";
 import { formatTokenCount } from "../utils/usage";
+
+type DashboardCopy = MessageCatalog["dashboard"];
+
+type DashboardFilters = {
+  endpoint: string;
+  model: string;
+  account: string;
+};
+
+const ALL_FILTER_VALUE = "__all__";
 
 type DashboardPanelProps = {
   status: ApiProxyStatus;
@@ -84,7 +96,25 @@ function formatEventTime(value: number): string {
 }
 
 function resolveActiveAccount(status: ApiProxyStatus): string {
-  return status.activeAccountLabel ?? status.activeAccountKey ?? status.activeAccountId ?? "--";
+  return maskSensitiveAccountLabel(status.activeAccountLabel ?? status.activeAccountKey ?? status.activeAccountId) ?? "--";
+}
+
+function maskSensitiveAccountLabel(value: string | null | undefined): string | null {
+  if (!value) {
+    return null;
+  }
+  const compact = value.split(/\s+/).join(" ").trim();
+  if (!compact) {
+    return null;
+  }
+  const [name, domain] = compact.split("@");
+  if (domain) {
+    return `${name.charAt(0) || "*"}***@${domain}`;
+  }
+  if (compact.length > 12) {
+    return `${compact.slice(0, 4)}***${compact.slice(-4)}`;
+  }
+  return compact;
 }
 
 function formatRequestPhase(phase: string): string {
@@ -136,6 +166,73 @@ function formatEventErrorDetails(event: DashboardMetricEvent): string {
     parts.push(event.failureBrief);
   }
   return parts.join(" · ");
+}
+
+function formatRouteExplanation(event: DashboardMetricEvent, copy: DashboardCopy): string {
+  const route = event.routeExplanation;
+  if (!route) {
+    return "--";
+  }
+  const parts = [
+    copy.routeStrategy(route.strategy || "--"),
+    copy.routeCandidates(route.availableCandidateCount, route.initialCandidateCount),
+  ];
+  if (route.selectedAccountLabel) {
+    parts.push(copy.routeSelected(maskSensitiveAccountLabel(route.selectedAccountLabel) ?? route.selectedAccountLabel));
+  }
+  if (route.selectedAccountId) {
+    parts.push(copy.routeSelectedId(route.selectedAccountId));
+  }
+  if (route.requestedAccountMatched) {
+    parts.push(copy.routeRequestedAccount);
+  }
+  if (route.affinityMatched) {
+    parts.push(copy.routeAffinityMatched);
+  } else if (route.affinityKeyPresent) {
+    parts.push(copy.routeAffinitySkipped(route.affinitySkippedReason ?? copy.routeAffinityMiss));
+  }
+  if (route.excludedByAuth > 0) {
+    parts.push(copy.routeExcludedAuth(route.excludedByAuth));
+  }
+  if (route.excludedByUsage > 0) {
+    parts.push(copy.routeExcludedUsage(route.excludedByUsage));
+  }
+  if (route.cooldownApplied) {
+    parts.push(copy.routeCooldown(route.excludedByCooldown));
+  }
+  if (route.latencyPreferred) {
+    parts.push(copy.routeLatencyPreferred);
+  }
+  return parts.join(" · ");
+}
+
+function uniqueFilterValues(values: Array<string | null | undefined>): string[] {
+  return Array.from(
+    new Set(
+      values
+        .map((value) => value?.trim())
+        .filter((value): value is string => Boolean(value)),
+    ),
+  ).sort((left, right) => left.localeCompare(right));
+}
+
+function normalizeAccountFilterValue(value: string | null | undefined): string | null {
+  return maskSensitiveAccountLabel(value);
+}
+
+function eventAccountLabel(event: DashboardMetricEvent): string | null {
+  return event.accountLabel ?? event.routeExplanation?.selectedAccountLabel ?? null;
+}
+
+function filterEvents(events: DashboardMetricEvent[], filters: DashboardFilters): DashboardMetricEvent[] {
+  return events.filter((event) => {
+    const endpointMatched = filters.endpoint === ALL_FILTER_VALUE || event.endpoint === filters.endpoint;
+    const modelMatched = filters.model === ALL_FILTER_VALUE || (event.model ?? "") === filters.model;
+    const accountMatched =
+      filters.account === ALL_FILTER_VALUE ||
+      (normalizeAccountFilterValue(eventAccountLabel(event)) ?? "") === filters.account;
+    return endpointMatched && modelMatched && accountMatched;
+  });
 }
 
 function DashboardMetaItem({
@@ -281,21 +378,23 @@ function EventTable({
   title,
   events,
   empty,
+  copy,
 }: {
   title: string;
   events: DashboardMetricEvent[];
   empty: string;
+  copy: DashboardCopy;
 }) {
   return (
     <section className="dashboardSectionCard dashboardRequestsCard">
       <div className="dashboardSectionHeader">
         <div>
           <h3>{title}</h3>
-          <p>最近完成的代理请求，表格可横向滚动查看耗时与令牌。</p>
+          <p>{copy.eventsDescription}</p>
         </div>
       </div>
       {events.length === 0 ? (
-        <EmptyState icon="□" title={empty} description="新请求完成后会自动出现在这里。" />
+        <EmptyState icon="□" title={empty} description={copy.eventsEmptyDescription} />
       ) : (
         <div className="dashboardTableWrap">
           <table className="dashboardTable">
@@ -310,24 +409,30 @@ function EventTable({
                 <th>流式</th>
                 <th>总耗时</th>
                 <th>首字节</th>
-                <th>错误详情</th>
+                <th>{copy.routeColumn}</th>
+                <th>{copy.errorDetailsColumn}</th>
                 <th>令牌</th>
               </tr>
             </thead>
             <tbody>
               {events.map((event, index) => {
                 const errorDetails = formatEventErrorDetails(event);
+                const routeExplanation = formatRouteExplanation(event, copy);
+                const accountLabel = maskSensitiveAccountLabel(eventAccountLabel(event)) ?? "--";
                 return (
                   <tr key={`${event.finishedAt}-${event.endpoint}-${index}`}>
                     <td>{formatEventTime(event.finishedAt)}</td>
                     <td title={event.endpoint}>{event.endpoint}</td>
                     <td title={event.model ?? ""}>{event.model ?? "--"}</td>
-                    <td title={event.accountLabel ?? ""}>{event.accountLabel ?? "--"}</td>
+                    <td title={accountLabel}>{accountLabel}</td>
                     <td>{formatEventStatus(event)}</td>
                     <td>{formatBytes(event.requestBytes)}</td>
                     <td>{formatStreamMode(event.downstreamStream)}</td>
                     <td>{formatMs(event.totalMs)}</td>
                     <td>{formatMs(event.firstChunkMs)}</td>
+                    <td className="dashboardRouteCell" title={routeExplanation}>
+                      {routeExplanation}
+                    </td>
                     <td className="dashboardErrorCell" title={errorDetails}>
                       {errorDetails || "--"}
                     </td>
@@ -343,37 +448,42 @@ function EventTable({
   );
 }
 
-function FailureDiagnostics({ events }: { events: DashboardMetricEvent[] }) {
+function FailureDiagnostics({ events, copy }: { events: DashboardMetricEvent[]; copy: DashboardCopy }) {
   return (
     <section className="dashboardSectionCard dashboardDiagnosticCard">
       <div className="dashboardSectionHeader">
         <div>
           <h3>最近失败</h3>
-          <p>用于快速定位状态码、错误类型和慢请求。</p>
+          <p>{copy.failuresDescription}</p>
         </div>
       </div>
       {events.length === 0 ? (
-        <EmptyState icon="✓" title="暂无失败请求" description="当前窗口内没有失败记录。" />
+        <EmptyState icon="✓" title={copy.noFailuresTitle} description={copy.noFailuresDescription} />
       ) : (
         <div className="dashboardDiagnosticList">
           {events.map((event, index) => {
             const errorDetails = formatEventErrorDetails(event);
+            const routeExplanation = formatRouteExplanation(event, copy);
+            const accountLabel = maskSensitiveAccountLabel(event.accountLabel) ?? copy.unlabeledAccount;
             return (
               <article key={`${event.finishedAt}-${event.endpoint}-${index}`} className="dashboardDiagnosticItem isFailure">
                 <div>
                   <strong title={event.endpoint}>{event.endpoint}</strong>
-                  <span>{formatEventTime(event.finishedAt)} · {event.model ?? "未知模型"}</span>
+                  <span>{formatEventTime(event.finishedAt)} · {event.model ?? copy.unknownModel}</span>
                 </div>
                 <small title={formatEventStatus(event)}>
                   {formatEventStatus(event)}
                   {event.failureCategory ? ` · ${event.failureCategory}` : ""}
                 </small>
                 <p>
-                  {event.accountLabel ?? "未标记账号"} · 请求 {formatBytes(event.requestBytes)} ·{" "}
-                  {formatStreamMode(event.downstreamStream)} · 总耗时 {formatMs(event.totalMs)}
+                  {accountLabel} · {copy.requestBytes(formatBytes(event.requestBytes))} ·{" "}
+                  {formatStreamMode(event.downstreamStream)} · {copy.totalLatency(formatMs(event.totalMs))}
                 </p>
                 {errorDetails ? (
                   <pre className="dashboardErrorMessage">{errorDetails}</pre>
+                ) : null}
+                {routeExplanation !== "--" ? (
+                  <pre className="dashboardRouteMessage">{routeExplanation}</pre>
                 ) : null}
               </article>
             );
@@ -384,27 +494,30 @@ function FailureDiagnostics({ events }: { events: DashboardMetricEvent[] }) {
   );
 }
 
-function InFlightDiagnostics({ requests }: { requests: DashboardInFlightRequest[] }) {
+function InFlightDiagnostics({ requests, copy }: { requests: DashboardInFlightRequest[]; copy: DashboardCopy }) {
   return (
     <section className="dashboardSectionCard dashboardDiagnosticCard">
       <div className="dashboardSectionHeader">
         <div>
           <h3>进行中请求</h3>
-          <p>当前还未完成的代理请求。</p>
+          <p>{copy.inFlightDescription}</p>
         </div>
       </div>
       {requests.length === 0 ? (
-        <EmptyState icon="↻" title="没有进行中的请求" description="活跃流式请求会显示阶段和耗时。" />
+        <EmptyState icon="↻" title={copy.noInFlightTitle} description={copy.noInFlightDescription} />
       ) : (
         <div className="dashboardDiagnosticList">
           {requests.slice(0, 5).map((request) => (
             <article key={request.id} className="dashboardDiagnosticItem">
               <div>
                 <strong title={request.endpoint}>{request.endpoint}</strong>
-                <span>{request.model ?? "未知模型"} · {request.accountLabel ?? "未标记账号"}</span>
+                <span>
+                  {request.model ?? copy.unknownModel} ·{" "}
+                  {maskSensitiveAccountLabel(request.accountLabel) ?? copy.unlabeledAccount}
+                </span>
               </div>
               <small>{formatRequestPhase(request.phase)}</small>
-              <p>已耗时 {formatMs(request.elapsedMs)}</p>
+              <p>{copy.elapsed(formatMs(request.elapsedMs))}</p>
             </article>
           ))}
         </div>
@@ -587,13 +700,74 @@ function TimelineChart({
   );
 }
 
+function DashboardFiltersBar({
+  filters,
+  endpointOptions,
+  modelOptions,
+  accountOptions,
+  onChange,
+  copy,
+}: {
+  filters: DashboardFilters;
+  endpointOptions: string[];
+  modelOptions: string[];
+  accountOptions: string[];
+  onChange: (next: DashboardFilters) => void;
+  copy: DashboardCopy;
+}) {
+  const update = (patch: Partial<DashboardFilters>) => onChange({ ...filters, ...patch });
+  const renderSelect = (
+    label: string,
+    value: string,
+    options: string[],
+    onSelect: (value: string) => void,
+  ) => (
+    <label className="dashboardFilterField">
+      <span>{label}</span>
+      <select value={value} onChange={(event) => onSelect(event.target.value)}>
+        <option value={ALL_FILTER_VALUE}>{copy.filterAll}</option>
+        {options.map((option) => (
+          <option key={option} value={option}>
+            {option}
+          </option>
+        ))}
+      </select>
+    </label>
+  );
+
+  return (
+    <section className="dashboardFilterBar" aria-label={copy.filtersAriaLabel}>
+      <div>
+        <strong>{copy.filtersTitle}</strong>
+        <p>{copy.filtersDescription}</p>
+      </div>
+      <div className="dashboardFilterControls">
+        {renderSelect(copy.filterEndpoint, filters.endpoint, endpointOptions, (endpoint) =>
+          update({ endpoint }),
+        )}
+        {renderSelect(copy.filterModel, filters.model, modelOptions, (model) => update({ model }))}
+        {renderSelect(copy.filterAccount, filters.account, accountOptions, (account) =>
+          update({ account }),
+        )}
+      </div>
+    </section>
+  );
+}
+
 export function DashboardPanel({
   status,
   dashboard,
   runtimeDataInfo,
   onRefresh,
 }: DashboardPanelProps) {
+  const { copy } = useI18n();
+  const dashboardCopy = copy.dashboard;
   const [selectedWindow, setSelectedWindow] = useState<"10m" | "1h" | "24h">("10m");
+  const [filters, setFilters] = useState<DashboardFilters>({
+    endpoint: ALL_FILTER_VALUE,
+    model: ALL_FILTER_VALUE,
+    account: ALL_FILTER_VALUE,
+  });
   const selectedStats =
     selectedWindow === "10m"
       ? dashboard?.last10m
@@ -602,6 +776,30 @@ export function DashboardPanel({
         : dashboard?.last24h;
   const dataDir = runtimeDataInfo.dataDir || dashboard?.dataDir || "--";
   const metricsPath = dashboard?.metricsPath ?? "--";
+  const dashboardEvents = useMemo(
+    () => [...(dashboard?.recentRequests ?? []), ...(dashboard?.recentFailures ?? [])],
+    [dashboard?.recentFailures, dashboard?.recentRequests],
+  );
+  const endpointOptions = useMemo(
+    () => uniqueFilterValues(dashboardEvents.map((event) => event.endpoint)),
+    [dashboardEvents],
+  );
+  const modelOptions = useMemo(
+    () => uniqueFilterValues(dashboardEvents.map((event) => event.model)),
+    [dashboardEvents],
+  );
+  const accountOptions = useMemo(
+    () => uniqueFilterValues(dashboardEvents.map((event) => normalizeAccountFilterValue(eventAccountLabel(event)))),
+    [dashboardEvents],
+  );
+  const filteredRecentRequests = useMemo(
+    () => filterEvents(dashboard?.recentRequests ?? [], filters),
+    [dashboard?.recentRequests, filters],
+  );
+  const filteredRecentFailures = useMemo(
+    () => filterEvents(dashboard?.recentFailures ?? [], filters),
+    [dashboard?.recentFailures, filters],
+  );
 
   return (
     <section className="dashboardPage">
@@ -634,6 +832,15 @@ export function DashboardPanel({
         </section>
 
         <DashboardStats dashboard={dashboard} />
+
+        <DashboardFiltersBar
+          filters={filters}
+          endpointOptions={endpointOptions}
+          modelOptions={modelOptions}
+          accountOptions={accountOptions}
+          onChange={setFilters}
+          copy={dashboardCopy}
+        />
 
         {selectedStats ? (
           <TimelineChart
@@ -676,12 +883,13 @@ export function DashboardPanel({
         <section className="dashboardBottomGrid">
           <EventTable
             title="最近请求"
-            events={dashboard?.recentRequests ?? []}
+            events={filteredRecentRequests}
             empty="还没有请求记录"
+            copy={dashboardCopy}
           />
           <aside className="dashboardDiagnosticsStack">
-            <FailureDiagnostics events={dashboard?.recentFailures ?? []} />
-            <InFlightDiagnostics requests={dashboard?.inFlight ?? []} />
+            <FailureDiagnostics events={filteredRecentFailures} copy={dashboardCopy} />
+            <InFlightDiagnostics requests={dashboard?.inFlight ?? []} copy={dashboardCopy} />
           </aside>
         </section>
       </div>

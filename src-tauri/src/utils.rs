@@ -31,17 +31,26 @@ pub(crate) fn set_private_permissions(path: &Path) {
     let _ = try_set_private_permissions(path);
 }
 
+#[cfg_attr(not(unix), allow(dead_code))]
+fn private_permissions_mode(is_dir: bool) -> u32 {
+    if is_dir {
+        0o700
+    } else {
+        0o600
+    }
+}
+
 pub(crate) fn try_set_private_permissions(path: &Path) -> Result<(), String> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
 
-        let mut permissions = fs::metadata(path)
-            .map_err(|error| format!("读取文件权限失败 {}: {error}", path.display()))?
-            .permissions();
-        permissions.set_mode(0o600);
+        let metadata = fs::metadata(path)
+            .map_err(|error| format!("读取路径权限失败 {}: {error}", path.display()))?;
+        let mut permissions = metadata.permissions();
+        permissions.set_mode(private_permissions_mode(metadata.is_dir()));
         fs::set_permissions(path, permissions)
-            .map_err(|error| format!("设置文件权限失败 {}: {error}", path.display()))?;
+            .map_err(|error| format!("设置路径权限失败 {}: {error}", path.display()))?;
         Ok(())
     }
 
@@ -402,6 +411,12 @@ mod tests {
         let _ = fs::remove_dir_all(&sandbox);
 
         assert_eq!(resolved, Some(cargo_path));
+    }
+
+    #[test]
+    fn private_permissions_mode_keeps_directories_searchable() {
+        assert_eq!(private_permissions_mode(false), 0o600);
+        assert_eq!(private_permissions_mode(true), 0o700);
     }
 
     #[cfg(all(unix, not(target_os = "macos")))]

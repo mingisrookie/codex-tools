@@ -1,5 +1,13 @@
 ## 更新日志
 
+- v2.0.4 (2026-06-14)
+  1. API 反代默认启用 runtime-only session affinity，同一 `Session_id` / `session_id` 会优先粘同一账号，同时保留用量、认证、cooldown 和 EWMA latency 的可用性检查。
+  2. Dashboard、metrics 和 trace 增加账号路由解释，覆盖候选数、选中账号脱敏标签、账号 ID hash 摘要、affinity/cooldown/latency 参与情况和失败分类。
+  3. 补齐 `/v1/chat/completions` 流式路径的 metrics / trace 记录，并对 trace、metrics、账号 inspector 做脱敏，避免完整邮箱、账号 ID 或原始 session key 落盘。
+  4. 优化认证与持久化稳定性：access token 过期不再阻塞 keepalive，refresh token 失效才标记重授权；账号 store 和备份目录补齐私有权限处理。
+  5. GUI 改为更克制的控制台风格，账号页升级为“表格列表 + 右侧账号详情 inspector”，API 反代、Dashboard、设置页和顶部导航同步降噪。
+  6. 版本统一升到 2.0.4，覆盖前端 package、Tauri 配置、主程序 Cargo、proxyd Cargo 与 lockfile。
+
 - v2.0.3 (2026-06-13)
   1. 修复 `/v1/chat/completions` 在下游未显式传 `service_tier` 时没有为 Fast 模型默认补 `priority` 的问题，确保普通聊天入口也和 `/v1/responses` 一样默认走 Priority/Fast 档位。
   2. 保持下游 `service_tier: fast` 映射为上游 `priority`，不会把 `fast` 字符串原样透传给 Codex upstream。

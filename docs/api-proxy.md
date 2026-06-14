@@ -284,10 +284,29 @@ Tauri 命令入口在：
 - 顺序负载均衡避免长期压到同一个账号，但不会删除基础健康/计划/余量排序，也不会跨计划等级粘住低优先级账号
 - 账号用量自动刷新默认每 1 分钟一轮，可在账号界面按分钟调整；手动刷新按钮仍会立即请求
 
+### 9.1 Session affinity
+
+代理默认启用 runtime-only session affinity，用来让同一客户端会话优先命中同一账号，减少多轮工具/上下文请求在不同账号之间漂移。
+
+会话 key 来源：
+
+- 下游显式 header：`Session_id`、`x-session-id`、`x-codex-session-id`
+- Responses payload 字段：`session_id`、`sessionId`、`previous_response_id`、`conversation_id`、`user`
+
+关键边界：
+
+- 只保存短 hash，不保存原始 session/user 值。
+- 映射只存在于当前代理运行态，不写入 `accounts.json` 或设置。
+- 有容量上限和过期淘汰，避免长期增长。
+- affinity 在认证、用量、runtime cooldown 过滤之后才重排候选，所以不会绕过账号禁用、授权失败、用量耗尽或 cooldown。
+- 无 session key、无绑定、绑定账号当前不可用时，立即回退到原有平均/逐个负载策略和 EWMA 延迟优先逻辑。
+
 对应逻辑：
 
 - `load_proxy_candidates(...)`
 - `compare_proxy_candidates(...)`
+- `proxy_session_affinity_key(...)`
+- `apply_session_affinity(...)`
 
 ## 10. 请求发到上游时带了什么
 
@@ -444,9 +463,9 @@ OpenAI 里的：
    - usage
 5. 拼成一个普通的 OpenAI ChatCompletions JSON；如果先遇到 `response.failed` / `response.incomplete` / `response.cancelled`，按上游终止错误返回
 
-非流式 `/v1/chat/completions` 与 `/v1/responses` 都会写入 dashboard metrics / `api-proxy-trace.log`，关键阶段包括 `first_upstream_chunk`、`sse_terminal_event`、`non_stream_response_ready`。这里的总耗时以终止事件命中为准，不再把上游长连接后续 EOF 等待计入正常响应路径。trace、dashboard metrics 和 usage token 统计写入都在后台执行，不阻塞客户端响应返回。
+`/v1/chat/completions` 与 `/v1/responses` 的流式和非流式请求都会写入 dashboard metrics / `api-proxy-trace.log`，关键阶段包括 `first_upstream_chunk`、`sse_terminal_event`、`non_stream_response_ready` 或流式结束事件。非流式总耗时以终止事件命中为准，不再把上游长连接后续 EOF 等待计入正常响应路径。trace、dashboard metrics 和 usage token 统计写入都在后台执行，不阻塞客户端响应返回。
 
-Dashboard 的“最近请求”和“最近失败”会展示 status、`error_kind`、`failure_category` 与完整 `failure_brief`。其中 trace 文本仍保留短摘要，便于 tail 日志快速扫；前端日志卡片优先使用 metrics 中的完整错误正文，方便确认错误是否已经透传到用户侧。
+Dashboard 的“最近请求”和“最近失败”会展示 status、`error_kind`、`failure_category`、完整 `failure_brief` 和 `route_explanation`。其中 route explanation 包含负载策略、候选总数/可用候选数、选中账号脱敏标签与账号 ID hash 摘要、认证/用量/cooldown 排除计数、指定账号 header 是否命中、session affinity 是否命中、EWMA latency 是否参与。Dashboard 前端还支持按来源 endpoint、模型和脱敏账号筛选最近请求/失败；trace 文本只保留脱敏标签、hash 摘要和错误短摘要，便于 tail 日志快速扫；前端日志卡片优先使用 metrics 中的完整错误正文，方便确认错误是否已经透传到用户侧。
 
 ## 14. 失败重试与自动切号
 

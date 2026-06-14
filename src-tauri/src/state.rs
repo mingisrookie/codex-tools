@@ -14,6 +14,14 @@ use crate::auth::PendingOauthLogin;
 use crate::models::CloudflaredTunnelMode;
 
 #[derive(Debug, Default, Clone)]
+pub(crate) struct SessionAffinityEntry {
+    pub(crate) account_key: String,
+    pub(crate) account_id: String,
+    pub(crate) account_label: String,
+    pub(crate) updated_at: i64,
+}
+
+#[derive(Debug, Default, Clone)]
 pub(crate) struct ApiProxyRuntimeSnapshot {
     pub(crate) active_account_key: Option<String>,
     pub(crate) active_account_id: Option<String>,
@@ -21,6 +29,7 @@ pub(crate) struct ApiProxyRuntimeSnapshot {
     pub(crate) sequential_account_key: Option<String>,
     pub(crate) candidate_cooldowns: HashMap<String, i64>,
     pub(crate) candidate_latency_ms: HashMap<String, f64>,
+    pub(crate) session_affinity: HashMap<String, SessionAffinityEntry>,
     pub(crate) last_error: Option<String>,
 }
 

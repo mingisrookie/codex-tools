@@ -1,0 +1,5 @@
+{"file":".trellis/tasks/06-14-codex-tools-gui/prd.md","reason":"本任务的需求、非目标、阶段和验收标准"}
+{"file":"项目完整链路说明.md","reason":"核对账号、API 反代、dashboard、远程 proxyd、发布等现有链路"}
+{"file":"项目开发规范（AI协作）.md","reason":"执行阶段的架构边界、测试、文档和乱码要求"}
+{"file":"docs/api-proxy.md","reason":"API proxy route、候选账号、dashboard、trace 行为的长期说明"}
+{"file":".trellis/tasks/06-14-codex-tools-gui/design-notes.md","reason":"GUI 方向稿、采用点和非目标约束"}

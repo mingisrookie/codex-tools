@@ -47,6 +47,8 @@ use crate::utils::short_account;
 const DEACTIVATED_WORKSPACE_NOTICE: &str = "该账号已被踢出 team 组织，请重新授权后再刷新。";
 const DEACTIVATED_ACCOUNT_NOTICE: &str = "账号被封禁，请检查邮箱";
 const AUTH_EXPIRED_NOTICE: &str = "授权过期，请重新登录授权。";
+const USAGE_AUTH_TOKEN_EXPIRED_NOTICE: &str =
+    "用量刷新失败：登录令牌已过期，请刷新用量或切换账号重新校验。";
 const EXPORT_ARCHIVE_ENTRY_NAME: &str = "accounts.json";
 const KEEPALIVE_REFRESH_WINDOW_SECS: i64 = 10 * 60;
 const KEEPALIVE_MAX_LAST_REFRESH_AGE_SECS: i64 = 6 * 60 * 60;
@@ -783,22 +785,43 @@ async fn refresh_usage_for_target(
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct RefreshFailureState {
+    auth_refresh_blocked: bool,
+    auth_refresh_error: Option<String>,
+    refresh_error: Option<String>,
+}
+
+fn refresh_failure_state(raw_error: &str) -> RefreshFailureState {
+    if should_suspend_auth_keepalive(raw_error) {
+        let normalized_error = normalize_usage_error_message(raw_error);
+        return RefreshFailureState {
+            auth_refresh_blocked: true,
+            auth_refresh_error: Some(normalized_error.clone()),
+            refresh_error: Some(normalized_error),
+        };
+    }
+
+    RefreshFailureState {
+        auth_refresh_blocked: false,
+        auth_refresh_error: None,
+        refresh_error: Some(raw_error.to_string()),
+    }
+}
+
 async fn handle_refresh_failure(
     _app: &AppHandle,
     _state: &AppState,
     _account_key: &str,
     raw_error: &str,
-    _auth_refresh_blocked: &mut bool,
-    _auth_refresh_error: &mut Option<String>,
+    auth_refresh_blocked: &mut bool,
+    auth_refresh_error: &mut Option<String>,
     refresh_error: &mut Option<String>,
 ) {
-    if should_suspend_auth_keepalive(raw_error) {
-        let normalized_error = normalize_usage_error_message(raw_error);
-        *refresh_error = Some(normalized_error);
-        return;
-    }
-
-    *refresh_error = Some(raw_error.to_string());
+    let next = refresh_failure_state(raw_error);
+    *auth_refresh_blocked = next.auth_refresh_blocked;
+    *auth_refresh_error = next.auth_refresh_error;
+    *refresh_error = next.refresh_error;
 }
 
 async fn persist_account_refresh_state(
@@ -841,9 +864,17 @@ fn should_retry_with_token_refresh(
 
 fn should_suspend_auth_keepalive(raw_error: &str) -> bool {
     let normalized = raw_error.to_ascii_lowercase();
+    is_refresh_token_invalidation_error(&normalized)
+        || normalized.contains("deactivated_workspace")
+        || normalized.contains("your openai account has been deactivated")
+        || normalized.contains("account has been deactivated")
+        || normalized.contains("account deactivated")
+        || normalized.contains("deactivated_user")
+}
+
+fn is_refresh_token_invalidation_error(normalized: &str) -> bool {
     normalized.contains("refresh_token_reused")
-        || is_invalid_refresh_grant(&normalized)
-        || normalized.contains("provided authentication token is expired")
+        || is_invalid_refresh_grant(normalized)
         || normalized
             .contains("your refresh token has already been used to generate a new access token")
         || normalized.contains("refresh token expired")
@@ -855,12 +886,6 @@ fn should_suspend_auth_keepalive(raw_error: &str) -> bool {
         || normalized.contains("refresh token invalid")
         || normalized.contains("invalid refresh token")
         || normalized.contains("please try signing in again")
-        || normalized.contains("token is expired")
-        || normalized.contains("deactivated_workspace")
-        || normalized.contains("your openai account has been deactivated")
-        || normalized.contains("account has been deactivated")
-        || normalized.contains("account deactivated")
-        || normalized.contains("deactivated_user")
         || normalized.contains("auth.json 缺少 refresh_token")
 }
 
@@ -877,24 +902,13 @@ fn normalize_usage_error_message(raw_error: &str) -> String {
     {
         return DEACTIVATED_ACCOUNT_NOTICE.to_string();
     }
-    if normalized.contains("refresh_token_reused")
-        || is_invalid_refresh_grant(&normalized)
-        || normalized.contains("provided authentication token is expired")
-        || normalized
-            .contains("your refresh token has already been used to generate a new access token")
-        || normalized.contains("refresh token expired")
-        || normalized.contains("refresh_token expired")
-        || normalized.contains("expired refresh token")
-        || normalized.contains("refresh token is expired")
-        || normalized.contains("refresh token revoked")
-        || normalized.contains("refresh_token_revoked")
-        || normalized.contains("refresh token invalid")
-        || normalized.contains("invalid refresh token")
-        || normalized.contains("please try signing in again")
-        || normalized.contains("token is expired")
-        || normalized.contains("auth.json 缺少 refresh_token")
-    {
+    if is_refresh_token_invalidation_error(&normalized) {
         return AUTH_EXPIRED_NOTICE.to_string();
+    }
+    if normalized.contains("provided authentication token is expired")
+        || normalized.contains("token is expired")
+    {
+        return USAGE_AUTH_TOKEN_EXPIRED_NOTICE.to_string();
     }
     raw_error.to_string()
 }
@@ -1541,10 +1555,12 @@ mod tests {
     use super::build_refresh_targets;
     use super::expand_import_json_content;
     use super::normalize_usage_error_message;
+    use super::refresh_failure_state;
     use super::should_suspend_auth_keepalive;
     use super::upsert_prepared_import;
     use super::PreparedImport;
     use super::AUTH_EXPIRED_NOTICE;
+    use super::USAGE_AUTH_TOKEN_EXPIRED_NOTICE;
     use crate::models::AccountsStore;
     use crate::models::StoredAccount;
     use crate::models::UsageSnapshot;
@@ -1880,6 +1896,36 @@ mod tests {
 
         assert!(should_suspend_auth_keepalive(error));
         assert_eq!(normalize_usage_error_message(error), AUTH_EXPIRED_NOTICE);
+    }
+
+    #[test]
+    fn access_token_expired_does_not_suspend_keepalive_and_has_usage_notice() {
+        let error = "provided authentication token is expired";
+
+        assert!(!should_suspend_auth_keepalive(error));
+        assert_eq!(
+            normalize_usage_error_message(error),
+            USAGE_AUTH_TOKEN_EXPIRED_NOTICE
+        );
+    }
+
+    #[test]
+    fn refresh_failure_state_blocks_keepalive_for_invalid_refresh_token_only() {
+        let refresh_error = r#"刷新登录令牌失败 https://auth.openai.com/oauth/token -> 400 Bad Request: {"error":"invalid_grant","error_description":"Refresh token expired"}"#;
+        let access_error = "provided authentication token is expired";
+
+        let blocked = refresh_failure_state(refresh_error);
+        assert!(blocked.auth_refresh_blocked);
+        assert_eq!(
+            blocked.auth_refresh_error.as_deref(),
+            Some(AUTH_EXPIRED_NOTICE)
+        );
+        assert_eq!(blocked.refresh_error.as_deref(), Some(AUTH_EXPIRED_NOTICE));
+
+        let usage_only = refresh_failure_state(access_error);
+        assert!(!usage_only.auth_refresh_blocked);
+        assert_eq!(usage_only.auth_refresh_error, None);
+        assert_eq!(usage_only.refresh_error.as_deref(), Some(access_error));
     }
 
     fn stored_test_account(id: &str, email: &str, updated_at: i64) -> StoredAccount {

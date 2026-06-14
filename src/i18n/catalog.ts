@@ -167,6 +167,47 @@ export type MessageCatalog = {
   accountsGrid: {
     emptyTitle: string;
     emptyDescription: string;
+    tableKicker: string;
+    tableTitle: string;
+    tableDescription: string;
+    columnAccount: string;
+    columnStatus: string;
+    columnUsage: string;
+    columnProxy: string;
+    columnActions: string;
+    enabledStatus: string;
+    disabledStatus: string;
+    currentStatus: string;
+    authBlockedStatus: string;
+    profileIssueStatus: string;
+    needsActionStatus: string;
+    proxyReady: string;
+    proxyUnavailable: string;
+    actionSwitch: string;
+    inspectorEmptyTitle: string;
+    inspectorEmptyDescription: string;
+    inspectorUsageTitle: string;
+    inspectorDetailsTitle: string;
+    sourceLabel: string;
+    accountIdLabel: string;
+    profileReadyLabel: string;
+    errorTitle: string;
+    yes: string;
+    no: string;
+  };
+  accountsPage: {
+    title: string;
+    subtitle: string;
+    total: string;
+    active: string;
+    exhausted: string;
+    attention: string;
+    inspectorTitle: string;
+    inspectorCurrent: string;
+    inspectorProxyReady: string;
+    inspectorHealthy: string;
+    inspectorNeedsAction: string;
+    none: string;
   };
   bottomDock: {
     ariaLabel: string;
@@ -174,6 +215,42 @@ export type MessageCatalog = {
     proxy: string;
     dashboard: string;
     settings: string;
+  };
+  dashboard: {
+    filtersAriaLabel: string;
+    filtersTitle: string;
+    filtersDescription: string;
+    filterEndpoint: string;
+    filterModel: string;
+    filterAccount: string;
+    filterAll: string;
+    eventsDescription: string;
+    eventsEmptyDescription: string;
+    routeColumn: string;
+    errorDetailsColumn: string;
+    failuresDescription: string;
+    noFailuresTitle: string;
+    noFailuresDescription: string;
+    inFlightDescription: string;
+    noInFlightTitle: string;
+    noInFlightDescription: string;
+    unknownModel: string;
+    unlabeledAccount: string;
+    routeAffinityMiss: string;
+    routeRequestedAccount: string;
+    routeAffinityMatched: string;
+    routeLatencyPreferred: string;
+    routeStrategy: (strategy: string) => string;
+    routeCandidates: (available: number, initial: number) => string;
+    routeSelected: (label: string) => string;
+    routeSelectedId: (id: string) => string;
+    routeAffinitySkipped: (reason: string) => string;
+    routeExcludedAuth: (count: number) => string;
+    routeExcludedUsage: (count: number) => string;
+    routeCooldown: (count: number) => string;
+    requestBytes: (value: string) => string;
+    totalLatency: (value: string) => string;
+    elapsed: (value: string) => string;
   };
   apiProxy: {
     kicker: string;
@@ -571,7 +648,24 @@ function compileLocale(raw: RawMessageCatalog): MessageCatalog {
     },
     accountCard: raw.accountCard,
     accountsGrid: raw.accountsGrid,
+    accountsPage: raw.accountsPage,
     bottomDock: raw.bottomDock,
+    dashboard: {
+      ...raw.dashboard,
+      routeStrategy: (strategy) => fillTemplate(raw.dashboard.routeStrategy, { strategy }),
+      routeCandidates: (available, initial) =>
+        fillTemplate(raw.dashboard.routeCandidates, { available, initial }),
+      routeSelected: (label) => fillTemplate(raw.dashboard.routeSelected, { label }),
+      routeSelectedId: (id) => fillTemplate(raw.dashboard.routeSelectedId, { id }),
+      routeAffinitySkipped: (reason) =>
+        fillTemplate(raw.dashboard.routeAffinitySkipped, { reason }),
+      routeExcludedAuth: (count) => fillTemplate(raw.dashboard.routeExcludedAuth, { count }),
+      routeExcludedUsage: (count) => fillTemplate(raw.dashboard.routeExcludedUsage, { count }),
+      routeCooldown: (count) => fillTemplate(raw.dashboard.routeCooldown, { count }),
+      requestBytes: (value) => fillTemplate(raw.dashboard.requestBytes, { value }),
+      totalLatency: (value) => fillTemplate(raw.dashboard.totalLatency, { value }),
+      elapsed: (value) => fillTemplate(raw.dashboard.elapsed, { value }),
+    },
     apiProxy: {
       ...raw.apiProxy,
       remoteDeployProgressTitle: (label) =>

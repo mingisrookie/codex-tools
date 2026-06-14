@@ -1,0 +1,6 @@
+{"file":".trellis/tasks/06-14-codex-tools-gui/prd.md","reason":"按 PRD 验收范围核对实现和非目标"}
+{"file":"项目文件结构说明.md","reason":"检查新增/拆分文件是否同步长期结构文档"}
+{"file":"项目完整链路说明.md","reason":"检查后端链路、dashboard、GUI 状态流是否同步长期链路文档"}
+{"file":"项目开发规范（AI协作）.md","reason":"检查测试、文档、乱码和架构边界要求"}
+{"file":"docs/api-proxy.md","reason":"检查 API proxy 行为和调试说明是否同步"}
+{"file":".trellis/tasks/06-14-codex-tools-gui/design-notes.md","reason":"检查 GUI 实现是否遵循已确认的设计方向和非目标"}
