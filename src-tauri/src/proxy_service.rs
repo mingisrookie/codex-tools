@@ -130,18 +130,20 @@ const DEFAULT_IMAGE_CONTROLLER_MODEL: &str = "gpt-5.5";
 const DEFAULT_IMAGE_TOOL_MODEL: &str = "gpt-image-2";
 const IMAGE_VARIATION_PROMPT: &str = "Create a faithful variation of the provided image.";
 const MODELS: &[&str] = &[
-    "gpt-5",
     "gpt-5.5",
     "gpt-5.4",
     "gpt-5.4-mini",
-    "gpt-5-mini",
-    "gpt-5-codex",
-    "gpt-5-codex-mini",
-    "gpt-5.1-codex",
-    "gpt-5.1-codex-mini",
-    "gpt-5.1-codex-max",
-    "gpt-5.2-codex",
+    "gpt-5.3-codex-spark",
+    "codex-auto-review",
     "gpt-5.3-codex",
+    "gpt-5.2",
+    "gpt-image-2",
+    "gpt-image-1.5",
+    "gpt-image-1",
+    "gpt-image-1-mini",
+    "chatgpt-image-latest",
+];
+const IMAGE_MODELS: &[&str] = &[
     "gpt-image-2",
     "gpt-image-1.5",
     "gpt-image-1",
@@ -153,6 +155,7 @@ const REQUEST_MODEL_MAPPINGS: &[(&str, &str)] = &[
     ("gpt-5-5", "gpt-5.5"),
     ("gpt5.4", "gpt-5.4"),
     ("gpt-5-4", "gpt-5.4"),
+    ("gpt-5-mini", GPT_5_4_MINI_MODEL_ID),
 ];
 const RESPONSE_MODEL_NORMALIZATIONS: &[(&str, &str)] = &[
     ("gpt5.5", "gpt-5.5"),
@@ -1230,10 +1233,8 @@ async fn models_handler(
         return response;
     }
 
-    Json(build_models_response(Some(
-        read_gpt55_model_settings(&context.storage).await,
-    )))
-    .into_response()
+    let settings = read_gpt55_model_settings(&context.storage).await;
+    Json(build_models_response_for_context(&context, settings).await).into_response()
 }
 
 async fn read_gpt55_model_settings(storage: &ProxyStorageContext) -> AppSettings {
@@ -1274,6 +1275,74 @@ fn build_models_response(settings: Option<AppSettings>) -> Value {
             })
             .collect::<Vec<_>>(),
     })
+}
+
+async fn build_models_response_for_context(context: &ProxyContext, settings: AppSettings) -> Value {
+    if let Some(catalog) = fetch_first_available_codex_model_catalog(context).await {
+        if let Some(response) =
+            build_models_response_from_codex_catalog(&catalog, Some(settings.clone()))
+        {
+            return response;
+        }
+    }
+
+    build_models_response(Some(settings))
+}
+
+async fn fetch_first_available_codex_model_catalog(context: &ProxyContext) -> Option<Value> {
+    let selection = load_proxy_candidate_selection_cached(context).await.ok()?;
+    for candidate in filter_proxy_candidates_for_auth_refresh_state(selection.candidates, None) {
+        if let Ok(catalog) = fetch_candidate_codex_model_catalog(context, &candidate).await {
+            return Some(catalog);
+        }
+    }
+    None
+}
+
+fn build_models_response_from_codex_catalog(
+    catalog: &Value,
+    settings: Option<AppSettings>,
+) -> Option<Value> {
+    let catalog_models = catalog
+        .get("models")
+        .or_else(|| catalog.get("data"))
+        .and_then(Value::as_array)?;
+    let mut model_ids = catalog_models
+        .iter()
+        .filter_map(codex_catalog_model_id)
+        .filter(|model| is_codex_catalog_model(model))
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+
+    if model_ids.is_empty() {
+        return None;
+    }
+
+    for image_model in IMAGE_MODELS {
+        if !model_ids.iter().any(|model| model.as_str() == *image_model) {
+            model_ids.push((*image_model).to_string());
+        }
+    }
+
+    let settings = settings.unwrap_or_default();
+    let gpt55_context_window = settings.normalized_api_proxy_gpt55_context_window();
+    let gpt55_auto_compact_token_limit =
+        settings.normalized_api_proxy_gpt55_auto_compact_token_limit();
+
+    Some(json!({
+        "object": "list",
+        "data": model_ids
+            .iter()
+            .map(|model| {
+                build_model_response(
+                    model,
+                    gpt55_context_window,
+                    gpt55_auto_compact_token_limit,
+                )
+            })
+            .collect::<Vec<_>>(),
+        "models": catalog_models.clone(),
+    }))
 }
 
 fn is_codex_catalog_model(model: &str) -> bool {
@@ -1401,10 +1470,7 @@ fn build_codex_model_catalog_response(
 }
 
 fn supports_fast_speed_tier(model: &str) -> bool {
-    matches!(
-        model,
-        GPT_5_5_MODEL_ID | GPT_5_4_MODEL_ID | GPT_5_4_MINI_MODEL_ID
-    )
+    matches!(model, GPT_5_5_MODEL_ID | GPT_5_4_MODEL_ID)
 }
 
 fn codex_model_catalog_supports_priority(catalog: &Value, model: &str) -> bool {
@@ -1418,13 +1484,16 @@ fn codex_model_catalog_supports_priority(catalog: &Value, model: &str) -> bool {
         })
 }
 
+fn codex_catalog_model_id(entry: &Value) -> Option<&str> {
+    entry
+        .get("slug")
+        .and_then(Value::as_str)
+        .or_else(|| entry.get("id").and_then(Value::as_str))
+        .or_else(|| entry.get("model").and_then(Value::as_str))
+}
+
 fn codex_catalog_model_matches(entry: &Value, model: &str) -> bool {
-    ["slug", "id", "model"].iter().any(|key| {
-        entry
-            .get(*key)
-            .and_then(Value::as_str)
-            .is_some_and(|value| value == model)
-    })
+    codex_catalog_model_id(entry).is_some_and(|value| value == model)
 }
 
 fn codex_catalog_model_has_priority_tier(entry: &Value) -> bool {
@@ -1633,15 +1702,10 @@ fn codex_model_display_name(model: &str) -> &str {
         "gpt-5.5" => "GPT-5.5",
         "gpt-5.4" => "GPT-5.4",
         "gpt-5.4-mini" => "GPT-5.4-Mini",
+        "gpt-5.3-codex-spark" => "GPT-5.3-Codex-Spark",
+        "codex-auto-review" => "Codex Auto Review",
         "gpt-5.3-codex" => "GPT-5.3 Codex",
-        "gpt-5.2-codex" => "GPT-5.2 Codex",
-        "gpt-5.1-codex-max" => "GPT-5.1 Codex Max",
-        "gpt-5.1-codex-mini" => "GPT-5.1 Codex Mini",
-        "gpt-5.1-codex" => "GPT-5.1 Codex",
-        "gpt-5-codex-mini" => "GPT-5 Codex Mini",
-        "gpt-5-codex" => "GPT-5 Codex",
-        "gpt-5-mini" => "GPT-5 Mini",
-        "gpt-5" => "GPT-5",
+        "gpt-5.2" => "GPT-5.2",
         _ => model,
     }
 }
@@ -1649,6 +1713,8 @@ fn codex_model_display_name(model: &str) -> &str {
 fn codex_model_description(model: &str) -> &str {
     match model {
         "gpt-5.5" => "Frontier model for complex coding, research, and real-world work.",
+        "gpt-5.3-codex-spark" => "Ultra-fast coding model.",
+        "codex-auto-review" => "Automatic approval review model for Codex.",
         model if model.contains("mini") => {
             "Small, fast, and cost-efficient model for simpler coding tasks."
         }
@@ -8114,6 +8180,7 @@ mod tests {
     use super::apply_session_affinity;
     use super::build_api_proxy_usage_stats;
     use super::build_models_response;
+    use super::build_models_response_from_codex_catalog;
     use super::candidate_trace_label;
     use super::classify_retriable_failure;
     use super::codex_model_catalog_supports_priority;
@@ -8862,14 +8929,14 @@ mod tests {
     }
 
     #[test]
-    fn models_response_exposes_fast_speed_tier_for_gpt_5_4_family() {
+    fn models_response_exposes_fast_speed_tier_for_frontier_models() {
         let response = build_models_response(None);
         let models = response
             .get("models")
             .and_then(|value| value.as_array())
             .expect("codex model catalog should be present");
 
-        for model_id in ["gpt-5.5", "gpt-5.4", "gpt-5.4-mini"] {
+        for model_id in ["gpt-5.5", "gpt-5.4"] {
             let model = models
                 .iter()
                 .find(|model| {
@@ -8903,6 +8970,97 @@ mod tests {
                 Some([json!("fast")].as_slice())
             );
         }
+    }
+
+    #[test]
+    fn models_response_matches_upstream_codex_catalog_boundaries() {
+        let response = build_models_response(None);
+        let models = response
+            .get("models")
+            .and_then(|value| value.as_array())
+            .expect("codex model catalog should be present");
+        let slugs: Vec<&str> = models
+            .iter()
+            .filter_map(|model| model.get("slug").and_then(Value::as_str))
+            .collect();
+
+        assert!(slugs.contains(&"gpt-5.3-codex-spark"));
+        assert!(slugs.contains(&"codex-auto-review"));
+        assert!(!slugs.contains(&"gpt-5-mini"));
+
+        let gpt54_mini = models
+            .iter()
+            .find(|model| {
+                model
+                    .get("slug")
+                    .and_then(Value::as_str)
+                    .is_some_and(|slug| slug == "gpt-5.4-mini")
+            })
+            .expect("gpt-5.4-mini should be present");
+
+        assert_eq!(
+            gpt54_mini
+                .get("service_tiers")
+                .and_then(Value::as_array)
+                .map(Vec::is_empty),
+            Some(true)
+        );
+        assert_eq!(
+            gpt54_mini
+                .get("additional_speed_tiers")
+                .and_then(Value::as_array)
+                .map(Vec::is_empty),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn models_response_preserves_upstream_codex_catalog_when_available() {
+        let upstream_catalog = json!({
+            "models": [
+                {
+                    "slug": "gpt-5.3-codex-spark",
+                    "display_name": "GPT-5.3-Codex-Spark",
+                    "service_tiers": [],
+                    "additional_speed_tiers": [],
+                    "upstream_only": true
+                },
+                {
+                    "slug": "codex-auto-review",
+                    "display_name": "Codex Auto Review",
+                    "service_tiers": [],
+                    "additional_speed_tiers": []
+                }
+            ]
+        });
+
+        let response = build_models_response_from_codex_catalog(&upstream_catalog, None)
+            .expect("upstream catalog should build models response");
+        let models = response
+            .get("models")
+            .and_then(Value::as_array)
+            .expect("codex model catalog should be present");
+        let slugs = models
+            .iter()
+            .filter_map(|model| model.get("slug").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+
+        assert_eq!(slugs, vec!["gpt-5.3-codex-spark", "codex-auto-review"]);
+        assert_eq!(models[0].get("upstream_only"), Some(&json!(true)));
+
+        let data_ids = response
+            .get("data")
+            .and_then(Value::as_array)
+            .expect("OpenAI model data should be present")
+            .iter()
+            .filter_map(|model| model.get("id").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+
+        assert!(data_ids.contains(&"gpt-5.3-codex-spark"));
+        assert!(data_ids.contains(&"codex-auto-review"));
+        assert!(data_ids.contains(&"gpt-image-2"));
+        assert!(!data_ids.contains(&"gpt-5-mini"));
+        assert!(!data_ids.contains(&"gpt-5.2"));
     }
 
     #[test]
@@ -9437,6 +9595,42 @@ mod tests {
         assert_eq!(
             payload.get("model").and_then(|value| value.as_str()),
             Some("gpt-5.4")
+        );
+    }
+
+    #[test]
+    fn maps_responses_request_gpt_5_mini_compatibility_alias_to_codex_mini() {
+        let request = json!({
+            "model": "gpt-5-mini",
+            "input": "hello"
+        });
+
+        let (payload, downstream_stream) =
+            normalize_openai_responses_request(request).expect("request should normalize");
+
+        assert!(!downstream_stream);
+        assert_eq!(
+            payload.get("model").and_then(|value| value.as_str()),
+            Some("gpt-5.4-mini")
+        );
+    }
+
+    #[test]
+    fn maps_chat_request_gpt_5_mini_compatibility_alias_to_codex_mini() {
+        let request = json!({
+            "model": "gpt-5-mini",
+            "messages": [
+                { "role": "user", "content": "hello" }
+            ]
+        });
+
+        let (payload, downstream_stream) =
+            convert_openai_chat_request_to_codex(&request).expect("payload should convert");
+
+        assert!(!downstream_stream);
+        assert_eq!(
+            payload.get("model").and_then(|value| value.as_str()),
+            Some("gpt-5.4-mini")
         );
     }
 

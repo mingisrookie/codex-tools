@@ -170,9 +170,13 @@ Tauri 命令入口在：
 
 特点：
 
-- 这里不是实时问上游拿模型
-- 目前返回的是本地静态模型列表
-- 目的是让大多数依赖 `/v1/models` 的客户端能正常初始化
+- 有可用账号时，优先读取 Codex upstream 的 `/backend-api/codex/models?client_version=...`
+- 返回里的 `models` 字段保留上游 Codex catalog 原样，避免把本地兼容别名暴露成“可选模型”
+- 返回里的 `data` 字段转换成 OpenAI-compatible model list，并追加本地图片接口支持的 `gpt-image-*` / `chatgpt-image-latest`
+- 如果账号不可用、catalog 读取失败或上游返回异常，才回退到本地静态 fallback
+- `gpt-5-mini` 不再作为可选模型展示；旧客户端请求里的 `gpt-5-mini` 会在转发前兼容映射到 `gpt-5.4-mini`
+- `gpt-5.3-codex-spark` 会随上游 catalog 暴露；静态 fallback 也包含该模型
+- `gpt-5.4-mini` 不标记 Fast / Priority 服务档位，除非未来上游 catalog 明确声明
 
 ### 6.3 `POST /v1/chat/completions`
 
@@ -413,6 +417,7 @@ OpenAI 里的：
 
 - 强制 `stream: true`
 - 强制 `store: false`
+- 模型名先做请求侧兼容映射：`gpt-5-mini` 会转成上游支持的 `gpt-5.4-mini`；响应侧不会再把上游模型名改回兼容别名
 - 对支持 Fast / Priority 服务档位的模型，如果下游没有传 `service_tier`，默认补 `service_tier: priority`；如果下游传 `service_tier: fast`，同样映射为上游的 `priority`
 - 兼容 OpenAI Responses 常见写法：`input` 为字符串时会转换为用户文本消息列表；下游传入的 `max_output_tokens` 会被剥离，避免 Codex upstream 拒绝该字段
 - 缺失时补 `instructions`
@@ -606,7 +611,7 @@ Cloudflared 不参与：
   - `POST /v1/images/edits`
   - `POST /v1/images/variations`
 - 其他 `/v1/*` 路径目前直接返回不支持
-- 模型列表是本地静态表，不是实时探测
+- 模型列表动态优先：有可用账号时按 Codex upstream catalog 原样返回；读取失败才使用本地静态 fallback
 - `/v1/responses` 的流式是近似透传，不额外做深层语义改写
 - 图片接口依赖账号是否具备上游图片能力；如果账号不支持 `image_generation` 工具，本地会返回上游的模型/工具受限错误
 - 核心目标是把最常用的聊天和图片链路稳定打通
@@ -770,6 +775,8 @@ base_url = "http://127.0.0.1:8787/v1"
 wire_api = "responses"
 requires_openai_auth = true
 ```
+
+模型名建议从 `/v1/models` 当前返回中选择，不要手填旧兼容名 `gpt-5-mini`。如果旧客户端仍发送 `gpt-5-mini`，代理会在请求转发前映射到 `gpt-5.4-mini`。
 
 如果你不是本机直连，而是通过 cloudflared 公网域名接入，把 `base_url` 改成：
 
