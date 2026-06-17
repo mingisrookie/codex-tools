@@ -1,5 +1,9 @@
 ## 更新日志
 
+- Unreleased
+  1. README 顶部对齐成熟开源项目入口：新增真实可验证的 Release、下载量、license、upstream stars、issues、PR、docs、DeepWiki、ChatGPT、技术栈和平台徽章。
+  2. 补充项目状态、能力矩阵、文档入口和支持范围边界，明确当前分发走 GitHub Release，npm 上的 `codex-tools` 不是本项目。
+
 - v2.0.5 (2026-06-15)
   1. 校准 API 反代模型 catalog：`/v1/models` 优先原样透出 Codex upstream catalog，静态 fallback 补充 `gpt-5.3-codex-spark` / `codex-auto-review`，不再展示 `gpt-5-mini`；旧请求里的 `gpt-5-mini` 兼容映射到 `gpt-5.4-mini`。
   2. 版本统一升到 2.0.5，覆盖前端 package、Tauri 配置、主程序 Cargo、proxyd Cargo 与 lockfile。
