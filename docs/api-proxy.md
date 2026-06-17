@@ -634,7 +634,8 @@ Cloudflared 不参与：
 - 前端控制器：
   - `src/hooks/useCodexController.ts`
 - 调试脚本：
-  - `scripts/test-codex-login-proxy.mjs`
+  - `scripts/bench-900k-fast-xhigh-compare.ps1`
+  - `scripts/probe-fast-service-tier.ps1`
 
 ## 21. 一个完整请求示例
 
@@ -691,28 +692,51 @@ curl http://127.0.0.1:8787/health
 ### 看模型列表
 
 ```bash
-npm run test:codex-login-proxy -- --api-key 你的sk
+curl http://127.0.0.1:8787/v1/models \
+  -H 'Authorization: Bearer 你的sk'
 ```
 
 ### 看聊天结果
 
 ```bash
-npm run test:codex-login-proxy -- --api-key 你的sk --prompt '1+1 等于几？只回答结果。'
+curl http://127.0.0.1:8787/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer 你的sk' \
+  -d '{
+    "model": "gpt-5",
+    "stream": false,
+    "messages": [
+      { "role": "user", "content": "1+1 等于几？只回答结果。" }
+    ]
+  }'
 ```
 
-### 保留原始响应
+### 保留原始响应用于排查
 
 ```bash
-npm run test:codex-login-proxy -- --api-key 你的sk --prompt '1+1 等于几？只回答结果。' --raw
+mkdir -p output
+curl -i http://127.0.0.1:8787/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -H 'Authorization: Bearer 你的sk' \
+  -d '{
+    "model": "gpt-5",
+    "stream": false,
+    "messages": [
+      { "role": "user", "content": "1+1 等于几？只回答结果。" }
+    ]
+  }' > output/api-proxy-chat-response.txt
 ```
 
-这会把：
+这会把响应头和响应体保存到本地文件，方便继续排查。Windows PowerShell 下如果 `curl` 被别名覆盖，使用 `curl.exe`。
 
-- 响应头
-- 原始 body
-- 请求元数据
+### 跑现有 benchmark / service tier 探测
 
-都落到本地文件，方便继续排查。
+仓库当前没有专用 npm 调试脚本，不要引用不存在的命令。已有的专项脚本是：
+
+```powershell
+.\scripts\probe-fast-service-tier.ps1 -BaseUrl http://127.0.0.1:8787/v1 -ApiKey 你的sk
+.\scripts\bench-900k-fast-xhigh-compare.ps1 -BaseUrl http://127.0.0.1:8787/v1 -ApiKey 你的sk
+```
 
 ## 23. 通过 CC Switch 接入 Codex
 

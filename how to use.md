@@ -57,18 +57,23 @@
 
 启动后，本地会提供 `/v1` 兼容接口，并自动从账号池里选择可用账号转发请求。
 
-`v1.9.0` 起，API 反代的账号选择更适合长上下文和多账号池场景：
+`v2.0.5` 反代重点能力如下：
 
 - 指定 `ChatGPT-Account-Id` 时只使用目标账号，不会自动回退到其它账号
 - 未指定账号时，顺序模式会优先当前账号；如果当前账号传输失败或进入 cooldown，会继续尝试其它健康账号
 - 5 小时用量已耗尽的账号会被跳过，等待用量刷新或重置后再放出
 - `send_failed` 会短暂 cooldown 并快速重试，减少偶发上游传输错误对后续请求的影响
+- `/v1/models` 优先返回 Codex upstream catalog；旧客户端发来的 `gpt-5-mini` 会在请求侧兼容映射到 `gpt-5.4-mini`
+- 默认启用 runtime-only session affinity：同一 `Session_id` / `session_id` 优先粘同一账号，但不会绕过认证、用量或 cooldown 检查
+- Dashboard 会展示最近请求、最近失败、延迟、token、in-flight 请求和脱敏后的路由解释，便于判断是账号、模型、上游还是客户端配置问题
+- 支持 `/v1/images/generations`、`/v1/images/edits`、`/v1/images/variations`，图片能力取决于账号是否具备上游 `image_generation` 工具权限
 
 注意：
 
 - 本机直连客户端可以直接使用本地 `Base URL`
 - `Cursor` 这类可能由服务端代发请求的客户端，不一定允许访问 `127.0.0.1` 或私网地址
 - 如果 Cursor 报 `ssrf_blocked`，请改用 `cloudflared` 暴露出来的公网地址，或使用远程 Linux 反代
+- 远程 Linux 反代可以在 API 反代面板里添加服务器，通过 SSH 部署 proxyd、安装 systemd、启动/停止并读取日志
 
 详细说明可参考 [docs/api-proxy.md](docs/api-proxy.md)。
 
@@ -87,7 +92,7 @@
 - 在调用失败或额度不足时，先看 API 反代面板里的最近请求和错误类型；`error sending request for url` 通常是上游传输失败，不等同于账号额度耗尽
 - 长文本或 benchmark 请求建议控制在 1MB 以内，并优先使用 `fast` + `xhigh` 的固定账号对比方式排查延迟
 - 如果长期需要外部工具接入，可以保持 API 反代开启
-- 如果要暴露给外网使用，可以再配置 `cloudflared`
+- 如果要暴露给外网使用，可以配置 `cloudflared`，或在服务器上部署远程 Linux proxyd
 
 ## 7. 一句话总结
 

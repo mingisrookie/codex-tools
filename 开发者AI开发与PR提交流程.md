@@ -52,8 +52,8 @@ gh auth login
 ## 仓库硬性规则
 
 1. 任何结论都不能猜，必须基于真实命令输出、真实 diff、真实代码上下文。
-2. 当前仓库主线分支是 `main`，远端主线是 `origin/main`。AI 不得把 PR 目标分支写成不存在的 `dev`。
-3. 发起 PR 前，必须先同步最新远端提交，确认当前分支已经吸收或评估了最新 `origin/main`。
+2. 当前仓库主线分支是 `main`。上游 PR 目标是 `origin/main`；本 fork 的发布主线是 `fork/main`。AI 不得把 PR 或发布目标写成不存在的 `dev`。
+3. 发起上游 PR 前，必须先同步最新 `origin/main`；做 fork 发布或补 Release 前，必须先同步最新 `fork/main`，并明确本次是在维护 fork 还是准备上游 PR。
 4. 如果发现当前 PR 的目标分支不是 `main`，AI 必须先说明并按权限改为 `main`，然后重新检查 PR 信息。
 5. 如果当前工作区有无法确认归属的脏改动，AI 必须先停下来告诉开发者，不能偷偷带进本次 PR，也不能擅自删除。
 6. 开发新功能时，不要为了兼容旧逻辑而保留明显无用的陈旧代码；如果确认无其他依赖，应一并清理。
@@ -110,7 +110,7 @@ git rev-list --left-right --count origin/main...HEAD
 git log --oneline HEAD..origin/main
 ```
 
-要求：真实判断当前分支是否落后于 `origin/main`。如果落后，可以先继续开发，但发起 PR 前必须补齐最新 `main` 或说明冲突风险。
+要求：真实判断当前分支是否落后于目标远端主线。上游 PR 看 `origin/main`；fork 发布看 `fork/main`。如果落后，可以先继续开发，但发起 PR / 发布前必须补齐最新 `main` 或说明冲突风险。
 
 ### 阶段 3：开发与本地整理
 
@@ -125,7 +125,7 @@ AI 开发时，必须遵守：
 
 ### 阶段 4：发起 PR 前再次同步最新 `main`
 
-只要准备发起 PR，就必须再次拉取远端最新提交：
+只要准备发起 PR，就必须再次拉取目标远端最新提交；上游 PR 默认是 `origin/main`，fork 发布默认是 `fork/main`。以下以上游 PR 为例：
 
 ```powershell
 git fetch origin
@@ -175,10 +175,18 @@ cargo test --manifest-path src-tauri/proxyd/Cargo.toml
 
 提交要求：PR 中只能包含与本次任务相关的改动；不带临时调试代码、无关格式化、构建产物、大日志、密钥、本地输出目录；提交信息描述真实功能结果，不写 `update`、`fix bug`、`merge branch`、`修改一下`；推送前确认当前分支不是 `main`，除非开发者明确要求。
 
-推送示例：
+推送示例（上游 PR 分支）：
 
 ```powershell
 git push -u origin <feature-branch>
+```
+
+fork 发布或补发布分支时，推送目标应明确写成 `fork`，例如：
+
+```powershell
+git push fork HEAD:<branch>
+git push fork HEAD:main
+git push fork vX.Y.Z
 ```
 
 ### 阶段 6：创建或更新 PR
@@ -268,7 +276,7 @@ git log --oneline -1
 ### 第 2 阶段：开发前基线
 
 - 新任务已从最新 `main` 拉分支。
-- 续做任务已确认自己相对 `origin/main` 的落后情况。
+- 续做任务已确认自己相对目标主线的落后情况：上游 PR 看 `origin/main`，fork 发布看 `fork/main`。
 - 没有误在 `main` 上直接开发，除非开发者明确要求。
 
 ### 第 3 阶段：开发中
@@ -281,7 +289,7 @@ git log --oneline -1
 
 ### 第 4 阶段：发 PR 前
 
-- 已再次获取最新 `origin/main`。
+- 已再次获取最新目标主线：上游 PR 看 `origin/main`，fork 发布看 `fork/main`。
 - 已完成必要的 `rebase` 或 `merge`。
 - `git diff --check` 通过。
 - diff 只包含本次任务改动。
