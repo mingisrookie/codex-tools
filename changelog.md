@@ -3,6 +3,7 @@
 - v2.0.5 (2026-06-15)
   1. 校准 API 反代模型 catalog：`/v1/models` 优先原样透出 Codex upstream catalog，静态 fallback 补充 `gpt-5.3-codex-spark` / `codex-auto-review`，不再展示 `gpt-5-mini`；旧请求里的 `gpt-5-mini` 兼容映射到 `gpt-5.4-mini`。
   2. 版本统一升到 2.0.5，覆盖前端 package、Tauri 配置、主程序 Cargo、proxyd Cargo 与 lockfile。
+  3. 同步 GitHub README、脱敏应用截图和 Release notes 自动抽取流程，后续 GitHub Release 默认从 `changelog.md` 当前版本段生成正文。
 
 - v2.0.4 (2026-06-14)
   1. API 反代默认启用 runtime-only session affinity，同一 `Session_id` / `session_id` 会优先粘同一账号，同时保留用量、认证、cooldown 和 EWMA latency 的可用性检查。

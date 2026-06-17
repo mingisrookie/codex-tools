@@ -1,144 +1,174 @@
 # Codex Tools
 
-一个基于 **React + Tauri** 的桌面工具，用来管理多个 Codex 账号，并提供本地 API 反代能力：
-- 查看账号用量
-- 快速切换和启动 Codex
-- 本地 `/v1` 反代
-- cloudflared 公网访问
+Codex Tools 是一个基于 **React + Tauri** 的桌面控制器，用来管理多组 Codex / ChatGPT 登录态，并把这些账号稳定地暴露成 OpenAI-compatible `/v1` 本地 API 反代。
 
-
-
-## 更新日志
-[更新日志](changelog.md)
-
-### v1.9.0 重点更新
-
-- 修复 Codex Tools 通过本地 `/v1/responses` 转发时比账号 CLI 慢的问题，减少指定账号请求中的本地写入延迟
-- 账号候选池增加缓存，并严格尊重 `ChatGPT-Account-Id`，避免指定账号请求回退到其它账号
-- 顺序模式下当前账号仍优先，但传输失败或 cooldown 后会继续尝试其它健康账号，避免有额度时误报“全部账号耗尽”
-- `send_failed` cooldown 收敛到 30 秒，并对 `error sending request for url` 做一次快速重试
-- 上游 HTTP 客户端切换到 rustls TLS 栈，并补充 900k fast/xhigh 对比 benchmark 脚本
-
-## Cursor API反代功能提示
-1. 通过 Cursor 官网 下载并安装 Cursor。
-
-2. 在 Cursor 中，点击2026-02-03_16-52-37图标，单击Cursor Settings，选择Models页面。
-
-3. 开启 OpenAI API Key，填入您的 API Key。
-
-4. 开启 Override OpenAI Base URL，填入可被 Cursor 访问的地址。
-
-5. 在Add or search model文本框中，输入Coding Plan支持的模型中的模型名称，点击Add Custom Model。
-
-6. 添加模型名称建议使用 `gpt-5.4`；同时兼容 `gpt-5-4` 别名
-
-### Cursor 接入注意事项
-
-- `ChatWise`、本地脚本、`curl` 这类本机直连客户端，可以直接使用本地 `Base URL`，例如 `http://127.0.0.1:8787/v1`
-- `Cursor` 不建议填写 `127.0.0.1`、`localhost`、`192.168.x.x`、`10.x.x.x` 这类本地或私网地址
-- 如果在 Cursor 里看到 `ssrf_blocked` 或 `connection to private IP is blocked`，通常不是代理本身报错，而是 Cursor 的模型提供方拦截了私网地址
-- 给 Cursor 使用时，请改用以下任意一种地址：
-- 使用应用内 `cloudflared` 生成的公网 `Public URL`
-- 使用“远程 Linux 反代”部署出来的公网服务器地址
-- 使用你自己的公网域名反向代理到本地或远程反代
+- 当前版本：`v2.0.5`
+- 当前维护发布页：<https://github.com/mingisrookie/codex-tools/releases>
+- 上游仓库：<https://github.com/170-carry/codex-tools>
+- 更新日志：[changelog.md](changelog.md)
 
 ## 应用截图
 
+> 截图使用脱敏示例数据，账号、API Key、路径和公网地址均已打码或替换为示例值。
+
 ![Codex Tools Screenshot](public/ScreenShot.png)
 
-## 解决codex-tools app 已损坏的方案
+## v2.0.5 重点能力
 
-> https://zhuanlan.zhihu.com/p/135948430
+### 多账号管理与切换
 
-> 省流:
+- OAuth 导入 Codex / ChatGPT 登录态账号，也支持批量导入、导出、重授权、重命名、启停用和删除。
+- 展示账号 5h、1week、credits、Codex session token 用量，并支持按分钟配置自动刷新。
+- 一键切换本机 Codex 账号，可选启动 Codex、同步 Opencode、重启选定编辑器。
+- 智能切换会按账号健康状态、用量余量和反代可用性选择更合适的账号。
 
-> sudo spctl  --master-disable
+### 本地 `/v1` API 反代
 
-> sudo xattr -r -d com.apple.quarantine /Applications/Codex\ Tools.app
+- 提供 OpenAI-compatible 接口：`/v1/models`、`/v1/chat/completions`、`/v1/responses`、`/v1/images/generations`、`/v1/images/edits`、`/v1/images/variations`。
+- 使用已登录 Codex 账号作为上游能力来源，支持 `gpt-5.4`、`gpt-5.5`、`gpt-image-2` 等模型链路。
+- `/v1/models` 优先原样透出 Codex upstream catalog，静态 fallback 补充 `gpt-5.3-codex-spark` / `codex-auto-review`。
+- 兼容旧客户端请求 `gpt-5-mini`，内部映射到上游支持的 `gpt-5.4-mini`，但模型列表不再展示旧别名。
+- 支持指定 `ChatGPT-Account-Id` 固定账号；未指定时按用量、认证状态、cooldown、顺序/平均负载策略选择账号。
+- 默认启用 runtime-only session affinity，同一会话优先粘同一账号，但不会绕过认证、用量或 cooldown 可用性检查。
+- 对 Fast / Priority 档位做兼容映射；下游传 `service_tier: fast` 时映射为上游 `priority`。
 
-## 快速启动（本地开发）
+### Dashboard、诊断与安全
 
-### 1) 环境准备
+- Dashboard 展示请求量、失败率、延迟分位、token、in-flight 请求、recent requests 和 recent failures。
+- trace / metrics 增加账号路由解释：候选数、选中账号脱敏标签、账号 ID hash、affinity、cooldown、latency 参与情况。
+- 账号、session key、邮箱、API key 等敏感字段默认脱敏，不把完整身份信息写进公开截图或文档。
+- 单账号或全部候选 cooldown 时不会再把候选池清空成误报 503；cooldown 只在仍有其他可用候选时用于失败降权。
+- access token 过期不直接阻塞 keepalive；只有 refresh token 失效、账号停用或确需登录时才提示重授权。
+
+### 公网访问与远程 proxyd
+
+- 可通过内置 cloudflared 快速隧道或命名隧道把本地反代暴露到公网。
+- 支持远程 Linux proxyd 部署，把代理服务放到服务器上运行。
+- 支持 CC Switch、Cursor、ChatWise、本地脚本或其他 OpenAI-compatible 客户端接入。
+
+## 快速使用
+
+### 1. 下载应用
+
+从当前维护发布页下载最新版本：
+
+<https://github.com/mingisrookie/codex-tools/releases/latest>
+
+如果 macOS 提示应用已损坏，可参考：
+
+```bash
+sudo spctl --master-disable
+sudo xattr -r -d com.apple.quarantine /Applications/Codex\ Tools.app
+```
+
+### 2. 导入账号
+
+1. 打开 Codex Tools。
+2. 在“账号”页点击“添加账号”。
+3. 选择 OAuth 登录、导入当前本机 Codex 登录态，或批量导入已有 auth JSON。
+4. 导入后刷新用量，确认账号状态为可用。
+
+### 3. 启动本地 API 反代
+
+1. 进入“API 反代”页。
+2. 配置端口和本地 API Key。
+3. 点击启动后，客户端使用：
+
+```text
+Base URL: http://127.0.0.1:<port>/v1
+API Key: 应用内显示的本地 proxy key
+```
+
+默认端口可在应用内调整；本机常见配置是 `8787` 或自定义端口。
+
+## 客户端接入提示
+
+### 本机客户端
+
+本机脚本、ChatWise、CC Switch 等客户端可以直接使用本地地址，例如：
+
+```text
+http://127.0.0.1:8787/v1
+```
+
+### Cursor
+
+Cursor 不建议填写 `127.0.0.1`、`localhost`、`192.168.x.x`、`10.x.x.x` 这类本地或私网地址。如果看到 `ssrf_blocked` 或 `connection to private IP is blocked`，通常是 Cursor 侧拦截私网地址，不是 Codex Tools 代理本身报错。
+
+给 Cursor 使用时建议选择：
+
+- 应用内 cloudflared 生成的公网 `Public URL`。
+- 远程 Linux proxyd 暴露的公网服务器地址。
+- 自己的公网域名反向代理到本地或远程反代。
+
+## 本地开发
+
+### 环境要求
 
 - Node.js 20+
 - Rust stable
-- macOS 或 Windows（优先支持 macOS）
+- Windows 或 macOS
 
-### 2) 安装依赖
+### 安装依赖
 
 ```bash
 npm install
 ```
 
-### 3) 启动桌面应用
+### 启动前端开发服务
+
+```bash
+npm run dev
+```
+
+### 启动桌面应用
 
 ```bash
 npm run tauri dev
 ```
 
-就这三步。
-
-## 主要功能
-
-### 1. 账号管理
-
-- 支持 OAuth 登录导入
-- 支持上传单个或多个 `.json` 文件批量导入，也支持回导入导出的 `accounts.json` 备份
-- 支持直接读取文件夹下的全部 `.json` 文件
-- 导入结束后会恢复当前本机登录态，不覆盖你正在使用的账号
-
-### 2. 用量查看与智能切换
-
-- 展示每个账号的 **5h**、**1week** 用量窗口和计划类型
-- 支持手动刷新，也会定时自动刷新
-- 支持按余量排序和智能切换到更合适的账号
-
-### 3. 切换账号并联动本机环境
-
-- 一键切换账号并启动 Codex
-- 找不到桌面应用时自动回退到 `codex app`
-- 可选同步 Opencode OpenAI 授权
-- 可选在切换后重启已选编辑器
-
-### 4. API 反代
-
-- 本地提供 OpenAI 兼容的 `/v1` 接口
-- 使用已登录的 Codex 账号作为上游能力来源
-- 支持固定端口、自定义端口、固定 API Key 和手动刷新 API Key
-- 按账号余量自动挑选可用账号进行转发
-- 支持指定 `ChatGPT-Account-Id` 固定账号转发；未指定账号时会按用量、cooldown 和顺序模式选择健康账号
-- 对上游传输失败会短暂 cooldown 当前账号并继续尝试其它可用账号，减少偶发 `502/503` 对账号池的影响
-- 可设置应用启动时自动启动 API 反代
-- 可作为 CC Switch 的 Codex 自定义 provider 上游，按 `responses` 协议接入
-
-### 5. 公网访问与桌面能力
-
-- 集成 cloudflared，可将本地反代暴露到公网
-- 支持快速隧道和命名隧道，可选 HTTP/2
-- 支持后台驻留、状态栏菜单、应用内更新和多语言界面
-
-API 反代详细链路见 [docs/api-proxy.md](docs/api-proxy.md)。
-
-## 打包与发布（简版）
-
-本项目已配置 GitHub Actions 自动发布（mac 双架构 + Windows）。
-
-触发发布：
+### 常用检查
 
 ```bash
-git tag v0.1.3
-git push origin v0.1.3
+npm run lint
+npm run build
+cargo test --manifest-path src-tauri/Cargo.toml
+cargo test --manifest-path src-tauri/proxyd/Cargo.toml
 ```
 
-查看：
-- 代码仓库: <https://github.com/170-carry/codex-tools>
-- 版本发布: <https://github.com/170-carry/codex-tools/releases>
+## 打包与发布
+
+版本发布需要同步更新：
+
+- `package.json`
+- `src-tauri/Cargo.toml`
+- `src-tauri/proxyd/Cargo.toml`
+- `src-tauri/tauri.conf.json`
+- `changelog.md`
+- 必要时同步 `README.md` 和截图
+
+推送 tag 后，GitHub Actions 会从 `changelog.md` 自动抽取对应版本段作为 Release notes：
+
+```bash
+git tag v2.0.5
+git push fork v2.0.5
+```
+
+本地无签名构建可使用：
+
+```bash
+npm run tauri -- build --no-bundle
+```
+
+详细 API 反代链路见 [docs/api-proxy.md](docs/api-proxy.md)，远程 Linux proxyd 见 [docs/linux-proxyd.md](docs/linux-proxyd.md)。
 
 ## 目录说明
 
-- 前端：`src/`
-- Tauri / Rust：`src-tauri/`
-- 发布流程：`.github/workflows/release.yml`
+- `src/`：React 前端、组件、状态 hook、i18n、样式。
+- `src-tauri/`：Tauri 2 桌面后端、账号/认证/设置/API 反代/cloudflared/远程 proxyd。
+- `src-tauri/proxyd/`：独立 Linux proxyd crate。
+- `docs/`：API 反代、远程 proxyd 等长期文档。
+- `.github/workflows/release.yml`：GitHub Actions 发布流程。
 
 ## Star History
 
