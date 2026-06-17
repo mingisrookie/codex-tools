@@ -6,9 +6,7 @@
 - 本地 `/v1` 反代
 - cloudflared 公网访问
 
-仓库地址：<https://github.com/170-carry/codex-tools>
 
-当前版本：`v1.9.0`
 
 ## 更新日志
 [更新日志](changelog.md)
