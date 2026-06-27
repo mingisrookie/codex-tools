@@ -1,8 +1,15 @@
 ## 更新日志
 
 - Unreleased
-  1. README 顶部对齐成熟开源项目入口：新增真实可验证的 Release、下载量、license、upstream stars、issues、PR、docs、DeepWiki、ChatGPT、技术栈和平台徽章。
-  2. 补充项目状态、能力矩阵、文档入口和支持范围边界，明确当前分发走 GitHub Release，npm 上的 `codex-tools` 不是本项目。
+  1. 暂无。
+
+- v2.0.6 (2026-06-28)
+  1. 账号详情新增 Codex 主动重置卡到期时间：调用 `/backend-api/wham/rate-limit-reset-credits`，只展示 `codex_rate_limits`、`available` 且未过期的卡。
+  2. 右侧 inspector 显示可用重置卡数量、最近一张到期时间，并支持展开查看全部可用重置卡到期时间；Relay/API 账号不展示该模块。
+  3. 重置卡详细接口失败只影响该模块的局部提示，不影响 5h / 1week / credits 用量展示；旧账号库缺少该字段时可正常读取。
+  4. README 顶部对齐成熟开源项目入口：新增真实可验证的 Release、下载量、license、upstream stars、issues、PR、docs、DeepWiki、ChatGPT、技术栈和平台徽章。
+  5. 补充项目状态、能力矩阵、文档入口和支持范围边界，明确当前分发走 GitHub Release，npm 上的 `codex-tools` 不是本项目。
+  6. 版本统一升到 2.0.6，覆盖前端 package、Tauri 配置、主程序 Cargo、proxyd Cargo 与 lockfile。
 
 - v2.0.5 (2026-06-15)
   1. 校准 API 反代模型 catalog：`/v1/models` 优先原样透出 Codex upstream catalog，静态 fallback 补充 `gpt-5.3-codex-spark` / `codex-auto-review`，不再展示 `gpt-5-mini`；旧请求里的 `gpt-5-mini` 兼容映射到 `gpt-5.4-mini`。

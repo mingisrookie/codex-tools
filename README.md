@@ -41,7 +41,7 @@
 
 | 项目 | 当前事实 |
 | --- | --- |
-| 当前版本 | `v2.0.5` |
+| 当前版本 | `v2.0.6` |
 | 维护发布页 | <https://github.com/mingisrookie/codex-tools/releases> |
 | 上游仓库 | <https://github.com/170-carry/codex-tools> |
 | 分发方式 | GitHub Release；未发布到 npm，npm 上的 `codex-tools` 不是本项目 |
@@ -52,7 +52,7 @@
 | 场景 | Codex Tools 提供什么 |
 | --- | --- |
 | 多账号切换 | OAuth / 本机 auth 导入、批量导入导出、重授权、重命名、启停用、智能切换 |
-| 用量与健康状态 | 5h、1week、credits、Codex session token 统计，支持按分钟自动刷新 |
+| 用量与健康状态 | 5h、1week、credits、主动重置卡到期时间、Codex session token 统计，支持按分钟自动刷新 |
 | 本地 API 反代 | 把 Codex 登录态账号池暴露为 OpenAI-compatible `/v1`，支持聊天、Responses、图片和 WebSocket |
 | 可观测诊断 | Dashboard、recent requests / failures、in-flight、延迟、token、脱敏路由解释和 trace |
 | 公网与远程部署 | cloudflared 快速/命名隧道，以及远程 Linux proxyd 的 SSH 部署、systemd 管理和日志读取 |
@@ -64,12 +64,13 @@
 
 ![Codex Tools Screenshot](public/ScreenShot.png)
 
-## v2.0.5 重点能力
+## v2.0.6 重点能力
 
 ### 多账号管理与切换
 
 - OAuth 导入 Codex / ChatGPT 登录态账号，也支持批量导入、导出、重授权、重命名、启停用和删除。
 - 展示账号 5h、1week、credits、Codex session token 用量，并支持按分钟配置自动刷新。
+- 在账号详情中展示可用主动重置卡数量、最近一张到期时间，并可展开查看全部可用重置卡到期时间。
 - 一键切换本机 Codex 账号，可选启动 Codex、同步 Opencode、重启选定编辑器。
 - 智能切换会按账号健康状态、用量余量和反代可用性选择更合适的账号。
 
@@ -216,13 +217,13 @@ cargo test --manifest-path src-tauri/proxyd/Cargo.toml
 - `changelog.md`
 - 必要时同步 `README.md` 和截图
 
-当前 `fork` 的 `v2.0.5` Release 已发布，Release notes 以 `changelog.md` 中对应版本段为准。现有 `.github/workflows/release.yml` 仍使用静态 release body；“自动从 `changelog.md` 抽取版本段”的 workflow patch 需要带 `workflow` scope 的 GitHub token 后再启用，不能在未成功推送前当成已生效能力。
+当前 `fork` 的 `v2.0.6` Release 已发布，Release notes 以 `changelog.md` 中对应版本段为准。现有 `.github/workflows/release.yml` 仍使用静态 release body；“自动从 `changelog.md` 抽取版本段”的 workflow patch 需要带 `workflow` scope 的 GitHub token 后再启用，不能在未成功推送前当成已生效能力。
 
 发布 tag 示例：
 
 ```bash
-git tag v2.0.5
-git push fork v2.0.5
+git tag v2.0.6
+git push fork v2.0.6
 ```
 
 本地无签名构建可使用：

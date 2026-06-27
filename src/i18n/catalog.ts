@@ -157,6 +157,14 @@ export type MessageCatalog = {
     resetAt: string;
     credits: string;
     unlimited: string;
+    resetCreditsAvailable: string;
+    resetCreditsNearestExpiry: string;
+    resetCreditsDetails: string;
+    resetCreditsCollapse: string;
+    resetCreditsEmpty: string;
+    resetCreditsFailed: string;
+    resetCreditsAllAvailable: string;
+    resetCreditsDetailItem: string;
     fiveHourFallback: string;
     oneWeekFallback: string;
     oneWeekLabel: string;

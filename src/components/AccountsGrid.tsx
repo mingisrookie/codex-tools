@@ -1,5 +1,5 @@
 import { useMemo, useState, type CSSProperties } from "react";
-import type { AccountSummary, UsageWindow } from "../types/app";
+import type { AccountSummary, RateLimitResetCreditsSnapshot, UsageWindow } from "../types/app";
 import { useI18n } from "../i18n/I18nProvider";
 import type { MessageCatalog } from "../i18n/catalog";
 import { compareAccountsByRemaining } from "../utils/accountRanking";
@@ -152,6 +152,78 @@ function UsageMeter({
   );
 }
 
+function formatResetCreditDetailLabel(template: string, index: number) {
+  return template.replace("{{index}}", String(index));
+}
+
+function ResetCreditsInspector({
+  snapshot,
+  expanded,
+  locale,
+  copy,
+  onToggle,
+}: {
+  snapshot: RateLimitResetCreditsSnapshot | null;
+  expanded: boolean;
+  locale: string;
+  copy: MessageCatalog["accountCard"];
+  onToggle: () => void;
+}) {
+  if (!snapshot) {
+    return null;
+  }
+
+  const hasError = Boolean(snapshot.error);
+  const hasCredits = !hasError && snapshot.credits.length > 0;
+
+  return (
+    <div className={`resetCreditsPanel ${hasError ? "hasError" : ""}`}>
+      <div className="resetCreditsSummary">
+        <div className="resetCreditsMetric isCount">
+          <span>{copy.resetCreditsAvailable}</span>
+          <strong>{hasError ? "--" : snapshot.availableCount}</strong>
+        </div>
+        {!hasError && snapshot.nextExpiresAt ? (
+          <div className="resetCreditsMetric">
+            <span>{copy.resetCreditsNearestExpiry}</span>
+            <strong>{formatResetValue(snapshot.nextExpiresAt, locale)}</strong>
+          </div>
+        ) : null}
+      </div>
+
+      {hasError ? <p className="resetCreditsMessage">{copy.resetCreditsFailed}</p> : null}
+      {!hasError && snapshot.availableCount === 0 ? (
+        <p className="resetCreditsMessage">{copy.resetCreditsEmpty}</p>
+      ) : null}
+
+      {hasCredits ? (
+        <button
+          type="button"
+          className="resetCreditsToggle"
+          onClick={onToggle}
+          aria-expanded={expanded}
+        >
+          {expanded ? copy.resetCreditsCollapse : copy.resetCreditsDetails}
+        </button>
+      ) : null}
+
+      {hasCredits && expanded ? (
+        <div className="resetCreditsListBlock">
+          <p className="resetCreditsListHeading">{copy.resetCreditsAllAvailable}</p>
+          <ol className="resetCreditsList">
+            {snapshot.credits.map((credit, index) => (
+              <li key={credit.id} className="resetCreditsItem">
+                <span>{formatResetCreditDetailLabel(copy.resetCreditsDetailItem, index + 1)}</span>
+                <strong>{formatResetValue(credit.expiresAt, locale)}</strong>
+              </li>
+            ))}
+          </ol>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function AccountPlanBadge({ account }: { account: AccountSummary }) {
   const { copy } = useI18n();
   const plan = account.sourceKind === "relay" ? "api" : account.planType || account.usage?.planType;
@@ -192,6 +264,9 @@ export function AccountsGrid({
   const [selectedAccountId, setSelectedAccountId] = useState<string | null>(
     () => pickDefaultAccount(sortedAccounts)?.id ?? null,
   );
+  const [expandedResetCreditsAccountId, setExpandedResetCreditsAccountId] = useState<string | null>(
+    null,
+  );
   const selectedAccount =
     sortedAccounts.find((account) => account.id === selectedAccountId) ??
     pickDefaultAccount(sortedAccounts);
@@ -217,6 +292,11 @@ export function AccountsGrid({
   const selectedErrors = selectedAccount ? collectAccountErrors(selectedAccount) : [];
   const fiveHour = selectedAccount?.usage?.fiveHour ?? null;
   const oneWeek = selectedAccount?.usage?.oneWeek ?? null;
+  const resetCredits =
+    selectedAccount?.sourceKind === "chatgpt"
+      ? (selectedAccount.usage?.rateLimitResetCredits ?? null)
+      : null;
+  const resetCreditsExpanded = expandedResetCreditsAccountId === selectedAccount?.id;
   const displayLabel = selectedAccount
     ? maskAccountLabel(
         selectedAccount.label ?? selectedAccount.email ?? selectedAccount.accountKey,
@@ -468,6 +548,17 @@ export function AccountsGrid({
             <section className="accountInspectorSection">
               <h4>{copy.accountsGrid.inspectorUsageTitle}</h4>
               <div className="accountInspectorUsage">
+                {selectedAccount.sourceKind === "chatgpt" ? (
+                  <ResetCreditsInspector
+                    snapshot={resetCredits}
+                    expanded={resetCreditsExpanded}
+                    locale={locale}
+                    copy={copy.accountCard}
+                    onToggle={() =>
+                      setExpandedResetCreditsAccountId(resetCreditsExpanded ? null : selectedAccount.id)
+                    }
+                  />
+                ) : null}
                 <UsageMeter
                   label={formatWindowLabel(fiveHour, {
                     fallback: copy.accountCard.fiveHourFallback,

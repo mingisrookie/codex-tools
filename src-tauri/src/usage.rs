@@ -1,8 +1,12 @@
 use serde::Deserialize;
 use std::error::Error as StdError;
+use time::format_description::well_known::Rfc3339;
+use time::OffsetDateTime;
 
 use crate::app_paths;
 use crate::models::CreditSnapshot;
+use crate::models::RateLimitResetCredit;
+use crate::models::RateLimitResetCreditsSnapshot;
 use crate::models::UsageSnapshot;
 use crate::models::UsageWindow;
 use crate::utils::now_unix_seconds;
@@ -11,6 +15,7 @@ use crate::utils::truncate_for_error;
 const DEFAULT_CHATGPT_BASE_URL: &str = "https://chatgpt.com";
 const CODEX_USAGE_PATH: &str = "/api/codex/usage";
 const WHAM_USAGE_PATH: &str = "/wham/usage";
+const WHAM_RATE_LIMIT_RESET_CREDITS_PATH: &str = "/wham/rate-limit-reset-credits";
 const BACKEND_API_PREFIX: &str = "/backend-api";
 
 #[derive(Debug, Deserialize)]
@@ -44,6 +49,21 @@ struct CreditDetails {
     has_credits: bool,
     unlimited: bool,
     balance: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RateLimitResetCreditsResponse {
+    available_count: Option<usize>,
+    credits: Option<Vec<RateLimitResetCreditRaw>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RateLimitResetCreditRaw {
+    id: Option<String>,
+    reset_type: Option<String>,
+    status: Option<String>,
+    granted_at: Option<String>,
+    expires_at: Option<String>,
 }
 
 pub(crate) async fn fetch_usage_snapshot(
@@ -92,7 +112,13 @@ pub(crate) async fn fetch_usage_snapshot(
                 continue;
             }
         };
-        return Ok(map_usage_payload(payload));
+        let mut snapshot = map_usage_payload(payload);
+        snapshot.rate_limit_reset_credits = Some(
+            fetch_rate_limit_reset_credits(&client, access_token, account_id)
+                .await
+                .unwrap_or_else(rate_limit_reset_credits_error_snapshot),
+        );
+        return Ok(snapshot);
     }
 
     if errors.is_empty() {
@@ -141,6 +167,30 @@ fn resolve_usage_urls() -> Vec<String> {
     deduped
 }
 
+fn resolve_rate_limit_reset_credit_urls() -> Vec<String> {
+    let mut candidates = resolve_rate_limit_reset_credit_urls_from_base(&resolve_chatgpt_base_origin());
+    candidates.push("https://chatgpt.com/backend-api/wham/rate-limit-reset-credits".to_string());
+
+    let mut deduped = Vec::new();
+    for url in candidates {
+        if !deduped.iter().any(|existing| existing == &url) {
+            deduped.push(url);
+        }
+    }
+    deduped
+}
+
+fn resolve_rate_limit_reset_credit_urls_from_base(base_url: &str) -> Vec<String> {
+    let normalized = base_url.trim_end_matches('/');
+    if normalized.ends_with(BACKEND_API_PREFIX) {
+        vec![format!("{normalized}{WHAM_RATE_LIMIT_RESET_CREDITS_PATH}")]
+    } else {
+        vec![format!(
+            "{normalized}{BACKEND_API_PREFIX}{WHAM_RATE_LIMIT_RESET_CREDITS_PATH}"
+        )]
+    }
+}
+
 pub(crate) fn resolve_chatgpt_base_origin() -> String {
     let base_url =
         read_chatgpt_base_url_from_config().unwrap_or_else(|| DEFAULT_CHATGPT_BASE_URL.to_string());
@@ -178,6 +228,83 @@ fn read_chatgpt_base_url_from_config() -> Option<String> {
     }
 
     None
+}
+
+async fn fetch_rate_limit_reset_credits(
+    client: &reqwest::Client,
+    access_token: &str,
+    account_id: &str,
+) -> Result<RateLimitResetCreditsSnapshot, String> {
+    let mut errors = Vec::new();
+
+    for url in resolve_rate_limit_reset_credit_urls() {
+        let response = match client
+            .get(&url)
+            .header("Authorization", format!("Bearer {access_token}"))
+            .header("ChatGPT-Account-Id", account_id)
+            .header("Accept", "application/json")
+            .header("OpenAI-Beta", "codex-1")
+            .header("Originator", "Codex Desktop")
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(err) => {
+                errors.push(format!("{url} -> {}", format_reqwest_error(&err)));
+                continue;
+            }
+        };
+
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            errors.push(format!(
+                "{url} -> {status}: {}",
+                truncate_for_error(&body, 140)
+            ));
+            continue;
+        }
+
+        let payload: RateLimitResetCreditsResponse = match response.json().await {
+            Ok(payload) => payload,
+            Err(err) => {
+                errors.push(format!("{url} -> 解析返回失败: {err}"));
+                continue;
+            }
+        };
+        return Ok(map_rate_limit_reset_credits_payload(
+            payload,
+            now_unix_seconds(),
+        ));
+    }
+
+    if errors.is_empty() {
+        return Err("请求重置卡接口失败: 未命中任何候选地址".to_string());
+    }
+    let preview = errors
+        .iter()
+        .take(2)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(" | ");
+    if errors.len() > 2 {
+        Err(format!(
+            "请求重置卡接口失败: {preview} | 另有 {} 个候选地址失败",
+            errors.len() - 2
+        ))
+    } else {
+        Err(format!("请求重置卡接口失败: {preview}"))
+    }
+}
+
+fn rate_limit_reset_credits_error_snapshot(error: String) -> RateLimitResetCreditsSnapshot {
+    RateLimitResetCreditsSnapshot {
+        fetched_at: now_unix_seconds(),
+        available_count: 0,
+        next_expires_at: None,
+        credits: Vec::new(),
+        error: Some(truncate_for_error(&error, 240)),
+    }
 }
 
 fn map_usage_payload(payload: UsageApiResponse) -> UsageSnapshot {
@@ -218,7 +345,60 @@ fn map_usage_payload(payload: UsageApiResponse) -> UsageSnapshot {
             unlimited: credit.unlimited,
             balance: credit.balance,
         }),
+        rate_limit_reset_credits: None,
     }
+}
+
+fn map_rate_limit_reset_credits_payload(
+    payload: RateLimitResetCreditsResponse,
+    fetched_at: i64,
+) -> RateLimitResetCreditsSnapshot {
+    let RateLimitResetCreditsResponse {
+        available_count: _reported_available_count,
+        credits,
+    } = payload;
+
+    let mut credits = credits
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|credit| {
+            if credit.reset_type.as_deref() != Some("codex_rate_limits")
+                || credit.status.as_deref() != Some("available")
+            {
+                return None;
+            }
+
+            let expires_at = parse_rfc3339_epoch_seconds(credit.expires_at.as_deref()?)?;
+            if expires_at <= fetched_at {
+                return None;
+            }
+
+            Some(RateLimitResetCredit {
+                id: credit.id?,
+                granted_at: credit
+                    .granted_at
+                    .as_deref()
+                    .and_then(parse_rfc3339_epoch_seconds),
+                expires_at,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    credits.sort_by_key(|credit| credit.expires_at);
+
+    RateLimitResetCreditsSnapshot {
+        fetched_at,
+        available_count: credits.len(),
+        next_expires_at: credits.first().map(|credit| credit.expires_at),
+        credits,
+        error: None,
+    }
+}
+
+fn parse_rfc3339_epoch_seconds(value: &str) -> Option<i64> {
+    OffsetDateTime::parse(value, &Rfc3339)
+        .ok()
+        .map(|datetime| datetime.unix_timestamp())
 }
 
 fn pick_nearest_window(windows: &[UsageWindowRaw], target_seconds: i64) -> Option<UsageWindowRaw> {
@@ -237,5 +417,88 @@ fn to_usage_window(window: UsageWindowRaw) -> UsageWindow {
         used_percent: window.used_percent,
         window_seconds: window.limit_window_seconds,
         reset_at: Some(window.reset_at),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_reset_credits_to_available_unexpired_details() {
+        let payload = RateLimitResetCreditsResponse {
+            available_count: Some(99),
+            credits: Some(vec![
+                RateLimitResetCreditRaw {
+                    id: Some("later".to_string()),
+                    reset_type: Some("codex_rate_limits".to_string()),
+                    status: Some("available".to_string()),
+                    granted_at: Some("2026-06-26T12:00:00Z".to_string()),
+                    expires_at: Some("2026-06-30T12:00:00Z".to_string()),
+                },
+                RateLimitResetCreditRaw {
+                    id: Some("soon".to_string()),
+                    reset_type: Some("codex_rate_limits".to_string()),
+                    status: Some("available".to_string()),
+                    granted_at: None,
+                    expires_at: Some("2026-06-28T12:00:00Z".to_string()),
+                },
+                RateLimitResetCreditRaw {
+                    id: Some("expired".to_string()),
+                    reset_type: Some("codex_rate_limits".to_string()),
+                    status: Some("available".to_string()),
+                    granted_at: None,
+                    expires_at: Some("2026-06-26T12:00:00Z".to_string()),
+                },
+                RateLimitResetCreditRaw {
+                    id: Some("redeemed".to_string()),
+                    reset_type: Some("codex_rate_limits".to_string()),
+                    status: Some("redeemed".to_string()),
+                    granted_at: None,
+                    expires_at: Some("2026-06-28T12:00:00Z".to_string()),
+                },
+                RateLimitResetCreditRaw {
+                    id: Some("other".to_string()),
+                    reset_type: Some("other_limits".to_string()),
+                    status: Some("available".to_string()),
+                    granted_at: None,
+                    expires_at: Some("2026-06-28T12:00:00Z".to_string()),
+                },
+                RateLimitResetCreditRaw {
+                    id: Some("invalid".to_string()),
+                    reset_type: Some("codex_rate_limits".to_string()),
+                    status: Some("available".to_string()),
+                    granted_at: None,
+                    expires_at: Some("not-a-date".to_string()),
+                },
+            ]),
+        };
+
+        let snapshot = map_rate_limit_reset_credits_payload(payload, 1_782_518_400);
+
+        assert_eq!(snapshot.available_count, 2);
+        assert_eq!(snapshot.next_expires_at, Some(1_782_648_000));
+        assert_eq!(
+            snapshot
+                .credits
+                .iter()
+                .map(|credit| credit.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["soon", "later"]
+        );
+        assert_eq!(snapshot.credits[1].granted_at, Some(1_782_475_200));
+        assert_eq!(snapshot.error, None);
+    }
+
+    #[test]
+    fn reset_credit_urls_normalize_backend_api_origin() {
+        assert_eq!(
+            resolve_rate_limit_reset_credit_urls_from_base("https://chatgpt.com/backend-api"),
+            vec!["https://chatgpt.com/backend-api/wham/rate-limit-reset-credits".to_string()]
+        );
+        assert_eq!(
+            resolve_rate_limit_reset_credit_urls_from_base("https://chatgpt.com"),
+            vec!["https://chatgpt.com/backend-api/wham/rate-limit-reset-credits".to_string()]
+        );
     }
 }

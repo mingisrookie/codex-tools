@@ -1028,6 +1028,142 @@
   text-overflow: ellipsis;
 }
 
+.resetCreditsPanel {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  column-gap: 12px;
+  row-gap: 8px;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid color-mix(in srgb, var(--line) 82%, var(--brand-cool) 18%);
+  border-radius: 12px;
+  background:
+    linear-gradient(
+      135deg,
+      color-mix(in srgb, var(--brand-cool) 10%, transparent),
+      color-mix(in srgb, var(--meta-bg) 52%, transparent)
+    );
+}
+
+.resetCreditsPanel.hasError {
+  border-color: color-mix(in srgb, var(--error-text) 30%, var(--line) 70%);
+  background: color-mix(in srgb, var(--card) 78%, var(--error-text) 6%);
+}
+
+.resetCreditsSummary {
+  display: grid;
+  grid-template-columns: minmax(58px, auto) minmax(0, 1fr);
+  align-items: end;
+  gap: 12px;
+  min-width: 0;
+}
+
+.resetCreditsMetric {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.resetCreditsMetric span,
+.resetCreditsMessage,
+.resetCreditsItem span {
+  color: var(--subtle);
+  font: 650 0.6rem/1.2 var(--font-ui);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.resetCreditsMetric strong,
+.resetCreditsItem strong {
+  min-width: 0;
+  color: color-mix(in srgb, var(--ink) 84%, var(--surface-tint) 16%);
+  font: 760 0.72rem/1.2 var(--font-ui);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.resetCreditsMetric.isCount strong {
+  color: color-mix(in srgb, var(--ink) 88%, var(--brand-cool) 12%);
+  font-size: 1.02rem;
+  line-height: 1;
+  letter-spacing: -0.03em;
+}
+
+.resetCreditsMessage {
+  margin: 0;
+  justify-self: end;
+  text-transform: none;
+  letter-spacing: 0;
+  white-space: nowrap;
+}
+
+.resetCreditsToggle {
+  justify-self: end;
+  border: 1px solid color-mix(in srgb, var(--line) 72%, transparent);
+  border-radius: 999px;
+  padding: 6px 12px;
+  color: color-mix(in srgb, var(--brand-cool) 58%, var(--ink) 42%);
+  background: color-mix(in srgb, var(--card) 86%, var(--brand-cool) 8%);
+  font: 700 0.62rem/1 var(--font-ui);
+  box-shadow: 0 8px 18px color-mix(in srgb, var(--shadow) 8%, transparent);
+  cursor: pointer;
+}
+
+.resetCreditsListBlock {
+  grid-column: 1 / -1;
+  padding-top: 7px;
+  border-top: 1px solid color-mix(in srgb, var(--line) 76%, transparent);
+}
+
+.resetCreditsListHeading {
+  margin: 0 0 5px;
+  color: color-mix(in srgb, var(--ink) 70%, var(--subtle) 30%);
+  font: 700 0.64rem/1.2 var(--font-ui);
+}
+
+.resetCreditsList {
+  display: grid;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.resetCreditsItem {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: baseline;
+  min-width: 0;
+  padding: 3px 0;
+  border-top: 1px solid color-mix(in srgb, var(--line) 52%, transparent);
+}
+
+.resetCreditsItem:first-child {
+  border-top: 0;
+}
+
+.resetCreditsItem::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  align-self: center;
+  background: color-mix(in srgb, var(--brand-cool) 72%, white 28%);
+  grid-column: 1;
+}
+
+.resetCreditsItem span {
+  grid-column: 2;
+}
+
+.resetCreditsItem strong {
+  grid-column: 3;
+}
+
 .errorText {
   margin: 0;
   color: var(--error-text);

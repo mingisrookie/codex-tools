@@ -1582,6 +1582,7 @@ mod tests {
                 reset_at: Some(30),
             }),
             credits: None,
+            rate_limit_reset_credits: None,
         }
     }
 

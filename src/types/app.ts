@@ -14,12 +14,27 @@ export type CreditSnapshot = {
   balance: string | null;
 };
 
+export type RateLimitResetCredit = {
+  id: string;
+  grantedAt: number | null;
+  expiresAt: number;
+};
+
+export type RateLimitResetCreditsSnapshot = {
+  fetchedAt: number;
+  availableCount: number;
+  nextExpiresAt: number | null;
+  credits: RateLimitResetCredit[];
+  error: string | null;
+};
+
 export type UsageSnapshot = {
   fetchedAt: number;
   planType: string | null;
   fiveHour: UsageWindow | null;
   oneWeek: UsageWindow | null;
   credits: CreditSnapshot | null;
+  rateLimitResetCredits: RateLimitResetCreditsSnapshot | null;
 };
 
 export type CodexTokenTotals = {

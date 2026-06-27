@@ -176,6 +176,8 @@ pub(crate) struct UsageSnapshot {
     pub(crate) five_hour: Option<UsageWindow>,
     pub(crate) one_week: Option<UsageWindow>,
     pub(crate) credits: Option<CreditSnapshot>,
+    #[serde(default)]
+    pub(crate) rate_limit_reset_credits: Option<RateLimitResetCreditsSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -192,6 +194,24 @@ pub(crate) struct CreditSnapshot {
     pub(crate) has_credits: bool,
     pub(crate) unlimited: bool,
     pub(crate) balance: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RateLimitResetCreditsSnapshot {
+    pub(crate) fetched_at: i64,
+    pub(crate) available_count: usize,
+    pub(crate) next_expires_at: Option<i64>,
+    pub(crate) credits: Vec<RateLimitResetCredit>,
+    pub(crate) error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct RateLimitResetCredit {
+    pub(crate) id: String,
+    pub(crate) granted_at: Option<i64>,
+    pub(crate) expires_at: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -835,6 +855,7 @@ mod tests {
                 reset_at: Some(30),
             }),
             credits: None,
+            rate_limit_reset_credits: None,
         }
     }
 
@@ -843,6 +864,20 @@ mod tests {
             r#"{{"email":"shared@example.com","https://api.openai.com/auth":{{"chatgpt_account_id":"account-1","chatgpt_plan_type":"{plan_type}"}}}}"#
         ));
         format!("header.{payload}.signature")
+    }
+
+    #[test]
+    fn usage_snapshot_defaults_missing_reset_credits_to_none() {
+        let snapshot: UsageSnapshot = serde_json::from_value(json!({
+            "fetchedAt": 10,
+            "planType": "plus",
+            "fiveHour": null,
+            "oneWeek": null,
+            "credits": null
+        }))
+        .expect("missing reset credit details should not break old stores");
+
+        assert!(snapshot.rate_limit_reset_credits.is_none());
     }
 
     fn stored_account(

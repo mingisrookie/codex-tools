@@ -8368,6 +8368,7 @@ mod tests {
                     reset_at: None,
                 }),
                 credits: None,
+                rate_limit_reset_credits: None,
             }),
             auth_refresh_blocked,
             auth_refresh_error: None,
